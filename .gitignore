@@ -1,0 +1,17 @@
+/target
+/.serena/
+/.idea/
+
+# local databases
+*.db
+*.db-*
+
+# local environment files
+.env
+.env.*
+
+# local logs
+*.log
+
+# optional editor settings
+/.vscode/
