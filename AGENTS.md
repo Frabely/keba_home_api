@@ -52,12 +52,15 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
    - `cargo fmt --check`
    - `cargo clippy -- -D warnings`
    - `cargo test`
-2. Release-Artefakt reproduzierbar bauen (locked deps, klare Build-Profile).
-3. Laufzeitbetrieb:
+2. Linting ist verbindlich:
+   - Warnungen und Fehler müssen spätestens vor jedem `git push` behoben sein.
+   - Pushes mit bekannten Lint-Problemen sind nicht zulässig.
+3. Release-Artefakt reproduzierbar bauen (locked deps, klare Build-Profile).
+4. Laufzeitbetrieb:
    - systemd Unit mit Restart-Strategie
    - Konfiguration via ENV/File
    - klarer Logging-Output für Journald
-4. Runbook bereitstellen: Start, Upgrade, Backup/Restore DB, häufige Fehlerbilder.
+5. Runbook bereitstellen: Start, Upgrade, Backup/Restore DB, häufige Fehlerbilder.
 
 ## Entscheidungsrahmen für Projektgröße
 1. MVP klein halten, aber Extension Points früh setzen:
@@ -71,7 +74,8 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
 1. Alle Tests grün, keine ignorierten fehlschlagenden Tests.
 2. Keine ungeklärten TODOs in kritischen Pfaden.
 3. API-Verträge und Konfigurationsoptionen dokumentiert.
-4. Migrations und Downgrade-Risiken bewertet.
+4. `cargo clippy -- -D warnings` muss grün sein.
+5. Migrations und Downgrade-Risiken bewertet.
 
 ## Zusammenarbeit
 1. Offene Annahmen früh benennen und als Rückfragen sammeln.
