@@ -1,1 +1,2 @@
-// Adapter layer placeholder for IO integrations (UDP, DB, HTTP).
+pub mod api;
+pub mod db;

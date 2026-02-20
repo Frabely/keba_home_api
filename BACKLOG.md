@@ -67,7 +67,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 
 ## Sprint 2: Persistenz und API v1 (Priorität: hoch)
 
-### 2.1 SQLite Schema + Migrationen
+### 2.1 SQLite Schema + Migrationen ✅
 - Scope:
   - Tabelle `sessions` mit `kwh REAL NOT NULL`, Index auf `created_at`.
   - Migrationseinführung statt ad-hoc SQL.
@@ -76,7 +76,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Integrationstests gegen temporäre SQLite.
 
-### 2.2 Repository-Layer
+### 2.2 Repository-Layer ✅
 - Scope:
   - `insert_session`, `get_latest_session`, `list_sessions(limit, offset)`.
 - Done:
@@ -84,7 +84,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Integrationstests inkl. Pagination und leerer DB.
 
-### 2.3 HTTP API v1
+### 2.3 HTTP API v1 ✅
 - Scope:
   - `GET /health`, `GET /sessions/latest`, `GET /sessions`.
   - Einheitliche Fehlerantworten und stabile JSON-Contracts.
