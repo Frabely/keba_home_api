@@ -39,7 +39,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 
 ## Sprint 1: Domain und Parsing (Priorität: hoch)
 
-### 1.1 KEBA Payload Parsing robust machen
+### 1.1 KEBA Payload Parsing robust machen ✅
 - Scope:
   - Tolerante Key-Auflösung (Alias-Keys, Felder mit Leerzeichen).
   - Unit-Heuristik für Energie (Wh/kWh).
