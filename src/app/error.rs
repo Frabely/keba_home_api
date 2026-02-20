@@ -6,6 +6,10 @@ pub enum AppError {
     LoggingInit(String),
     #[error("invalid configuration: {0}")]
     Config(String),
+    #[error("database initialization failed: {0}")]
+    DatabaseInit(String),
+    #[error("runtime failure: {0}")]
+    Runtime(String),
 }
 
 impl AppError {
@@ -15,6 +19,14 @@ impl AppError {
 
     pub fn config<E: std::fmt::Display>(error: E) -> Self {
         Self::Config(error.to_string())
+    }
+
+    pub fn database_init<E: std::fmt::Display>(error: E) -> Self {
+        Self::DatabaseInit(error.to_string())
+    }
+
+    pub fn runtime<E: std::fmt::Display>(error: E) -> Self {
+        Self::Runtime(error.to_string())
     }
 }
 

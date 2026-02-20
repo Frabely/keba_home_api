@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod logging;
+mod runtime;
 
 pub use error::AppError;
 
@@ -19,5 +20,5 @@ pub fn run() -> Result<(), AppError> {
         "application bootstrap initialized"
     );
 
-    Ok(())
+    runtime::run(config)
 }
