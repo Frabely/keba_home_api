@@ -1,0 +1,22 @@
+[Unit]
+Description=KEBA Home API Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keba
+Group=keba
+WorkingDirectory=/opt/keba_home_api
+EnvironmentFile=/etc/keba/keba-home-api.env
+ExecStart=/opt/keba_home_api/keba_home_api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/keba
+
+[Install]
+WantedBy=multi-user.target

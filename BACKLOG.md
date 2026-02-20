@@ -95,7 +95,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 
 ## Sprint 3: Runtime und Betrieb (Priorität: mittel)
 
-### 3.1 Poller + API orchestrieren
+### 3.1 Poller + API orchestrieren ✅
 - Scope:
   - Sauberer Start/Shutdown, Task-Orchestrierung, Retry-Verhalten.
 - Done:
@@ -103,7 +103,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Integrationstest mit simuliertem UDP-Responder.
 
-### 3.2 systemd + Runbook
+### 3.2 systemd + Runbook ✅
 - Scope:
   - service unit, ENV-Datei-Beispiel, Betriebsdoku (Start/Restart/Logs/Backup).
 - Done:
@@ -111,7 +111,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Manuelle Verifikation nach Checkliste.
 
-### 3.3 CI-Automation
+### 3.3 CI-Automation ✅
 - Scope:
   - CI mit `fmt`, `clippy -D warnings`, `test`.
 - Done:

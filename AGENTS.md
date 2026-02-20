@@ -97,6 +97,7 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
     - `git push` darf ohne Rückfrage ausgeführt werden, außer auf `master` und `production` (nur mit expliziter User-Anweisung).
 11. Vor neuen Feature-Vorschlägen zuerst Cleanup-Tasks priorisieren und aktiv vorschlagen.
 12. Feature-Vorschläge erst nach erledigtem oder bewusst dokumentiert zurückgestelltem Cleanup machen.
+13. Linting (`cargo clippy -- -D warnings`) erst nach Abschluss einer Aufgabe ausführen und alle Findings dann gebündelt beheben.
 
 ## Abnahmekriterien (DoD)
 1. Jede Änderung enthält mindestens einen relevanten Test oder eine begründete Testausnahme.
