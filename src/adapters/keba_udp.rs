@@ -50,7 +50,8 @@ impl KebaUdpClient {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(self.timeout))?;
         socket.set_write_timeout(Some(self.timeout))?;
-        socket.send_to(command.as_bytes(), self.target)?;
+        let payload = format!("{command}\r\n");
+        socket.send_to(payload.as_bytes(), self.target)?;
 
         let mut buffer = [0_u8; UDP_BUFFER_SIZE];
         let (size, _) = socket.recv_from(&mut buffer)?;

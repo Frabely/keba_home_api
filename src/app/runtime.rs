@@ -13,8 +13,9 @@ use thiserror::Error;
 
 use crate::adapters::api::{ApiState, configure_routes};
 use crate::adapters::db::{DbError, NewSessionRecord, insert_session};
+use crate::adapters::keba_modbus::KebaModbusClient;
 use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
-use crate::app::config::AppConfig;
+use crate::app::config::{AppConfig, KebaSource};
 use crate::app::error::AppError;
 use crate::domain::keba_payload::{ParseError, parse_report2, parse_report3};
 use crate::domain::session_energy::{EnergySnapshot, compute_session_kwh};
@@ -47,8 +48,8 @@ pub enum PollerError {
     Database(#[source] DbError),
 }
 
-pub struct SessionPoller<C, Cl> {
-    client: C,
+pub struct SessionPoller<Cl> {
+    client: Box<dyn KebaClient>,
     clock: Cl,
     connection: Arc<Mutex<Connection>>,
     machine: SessionStateMachine,
@@ -56,13 +57,9 @@ pub struct SessionPoller<C, Cl> {
     last_seconds: Option<u64>,
 }
 
-impl<C, Cl> SessionPoller<C, Cl>
-where
-    C: KebaClient,
-    Cl: Clock,
-{
+impl<Cl: Clock> SessionPoller<Cl> {
     pub fn new(
-        client: C,
+        client: Box<dyn KebaClient>,
         clock: Cl,
         connection: Arc<Mutex<Connection>>,
         debounce_samples: usize,
@@ -190,13 +187,12 @@ where
     }
 }
 
-pub fn start_poller<C, Cl>(
-    mut poller: SessionPoller<C, Cl>,
+pub fn start_poller<Cl>(
+    mut poller: SessionPoller<Cl>,
     poll_interval: Duration,
     stop_flag: Arc<AtomicBool>,
 ) -> JoinHandle<()>
 where
-    C: KebaClient,
     Cl: Clock + Send + 'static,
 {
     std::thread::spawn(move || {
@@ -219,8 +215,20 @@ pub fn run(config: AppConfig) -> Result<(), AppError> {
         connection: Arc::clone(&shared_connection),
     };
 
-    let keba_client =
-        KebaUdpClient::new(&config.keba_ip, config.keba_udp_port).map_err(AppError::runtime)?;
+    let keba_client: Box<dyn KebaClient> = match config.keba_source {
+        KebaSource::Udp => Box::new(
+            KebaUdpClient::new(&config.keba_ip, config.keba_udp_port).map_err(AppError::runtime)?,
+        ),
+        KebaSource::Modbus => Box::new(
+            KebaModbusClient::new(
+                &config.keba_ip,
+                config.keba_modbus_port,
+                config.keba_modbus_unit_id,
+                config.keba_modbus_energy_factor_wh,
+            )
+            .map_err(AppError::runtime)?,
+        ),
+    };
     let poller = SessionPoller::new(
         keba_client,
         SystemClock,
@@ -370,7 +378,8 @@ mod tests {
         run_migrations(&mut connection).expect("migrations should succeed");
         let shared_connection = Arc::new(Mutex::new(connection));
 
-        let client = KebaUdpClient::new("127.0.0.1", responder_port).expect("client should build");
+        let client =
+            Box::new(KebaUdpClient::new("127.0.0.1", responder_port).expect("client should build"));
         let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
         let mut poller = SessionPoller::new(client, clock, Arc::clone(&shared_connection), 2);
 
