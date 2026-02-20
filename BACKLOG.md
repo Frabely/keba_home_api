@@ -48,7 +48,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Table-driven Unit-Tests für Varianten und malformed payloads.
 
-### 1.2 Session-State-Machine implementieren
+### 1.2 Session-State-Machine implementieren ✅
 - Scope:
   - Debounce-Logik, Transitionen `unplugged -> plugged -> unplugged`.
   - Zeitquelle abstrahieren (Clock-Interface).
@@ -57,7 +57,7 @@ Umsetzbares Step-by-Step-Backlog für den KEBA P30 Home Service mit Fokus auf Cl
 - Tests:
   - Unit-Tests für Debounce, Flattern, Reconnect, Counter-Reset.
 
-### 1.3 kWh-Strategie final implementieren
+### 1.3 kWh-Strategie final implementieren ✅
 - Scope:
   - Primär `E pres`, Fallback `total-diff`, inklusive Plausibilitätschecks.
 - Done:
