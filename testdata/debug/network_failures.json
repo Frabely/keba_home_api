@@ -1,0 +1,11 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "error": "network_unreachable" },
+    { "error": "host_unreachable" },
+    { "ok": { "Plug": 0, "Seconds": 100 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 0, "E total": 280000000 } }
+  ]
+}

@@ -22,18 +22,25 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
 3. Config strikt zentralisieren (ENV + optional Datei), mit validierten Defaults.
 4. Zeitquellen abstrahieren (Clock-Interface), damit Session-Timestamps reproduzierbar testbar sind.
 5. Keine stillen Fallbacks: Fallback-Strategien explizit loggen.
+6. Verbindliches Persistenzmuster:
+   - Tabellenstrukturen werden über `domain/models` repräsentiert (Modelle als zentrale Datenverträge).
+   - Zugriffe auf Persistenz (Reads/Writes) erfolgen ausschließlich über Query-/Command-Handler in `app/services`.
+   - `adapters` enthalten nur technische DB-Operationen, werden aber nicht direkt aus API/Runtime konsumiert.
+   - Bei mehreren zugreifenden Pfaden muss derselbe Handler-Layer verwendet werden (kein direkter Parallelzugriff auf DB-Funktionen aus Feature-Code).
 
 ## API-Standards
 1. Konsequent versionierbare API-Pfade (mindestens intern vorbereitet, z. B. Router-Scope).
 2. Stabile JSON-Felder (camelCase), klare Statuscodes, reproduzierbare Fehlermodelle.
 3. Pagination bei Listen-Endpoints von Beginn an (limit/offset oder cursor, dokumentiert).
 4. Contract-Tests für alle produktiven Endpoints.
+5. Bei jedem API-Change ist `API.md` verpflichtend zu aktualisieren (Endpoint-Contract, Statuscodes, Beispiel-Requests via `curl`, Beispiel-Responses, Fehlerfälle).
 
 ## Daten und Persistenz
 1. Schema-Änderungen ausschließlich über Migrationen.
 2. UTC/ISO-8601 für alle Zeitstempel.
 3. Deterministische Insert-/Read-Pfade (kein implizites Verhalten).
 4. Indizes aus Query-Mustern ableiten, nicht raten.
+5. Primärschlüssel für persistierte Entitäten sind GUIDs/UUIDs (keine autoinkrementellen Integer-IDs in neuen oder migrierten Tabellen).
 
 ## Teststrategie (Pflicht)
 1. Unit-Tests:

@@ -1,0 +1,17 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "error": "timeout" },
+    { "ok": { "Plug": 0, "Seconds": 10 } },
+    { "ok": { "Plug": 0, "Seconds": 11 } },
+    { "ok": { "Plug": 7, "Seconds": 12 } },
+    { "ok": { "Plug": 7, "Seconds": 13 } },
+    { "ok": { "Plug": 0, "Seconds": 14 } },
+    { "ok": { "Plug": 0, "Seconds": 15 } }
+  ],
+  "report3": [
+    { "error": "connection_refused" },
+    { "ok": { "E pres": 10000, "E total": 280010000 } },
+    { "ok": { "E pres": 26000, "E total": 280026000 } }
+  ]
+}

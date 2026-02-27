@@ -1,0 +1,26 @@
+{
+  "loop_forever": false,
+  "report2": [
+    { "ok": { "Plug": 0, "Seconds": 10, "__tsMs": 1772203200000 } },
+    { "ok": { "Plug": 0, "Seconds": 11, "__tsMs": 1772206800000 } },
+
+    { "ok": { "Plug": 7, "Seconds": 12, "__tsMs": 1772210400000 } },
+    { "ok": { "Plug": 7, "Seconds": 13, "__tsMs": 1772214000000 } },
+    { "ok": { "Plug": 0, "Seconds": 14, "__tsMs": 1772217600000 } },
+    { "ok": { "Plug": 0, "Seconds": 15, "__tsMs": 1772221200000 } },
+
+    { "ok": { "Plug": 0, "Seconds": 16, "__tsMs": 1772228400000 } },
+    { "ok": { "Plug": 0, "Seconds": 17, "__tsMs": 1772232000000 } },
+
+    { "ok": { "Plug": 7, "Seconds": 18, "__tsMs": 1772235600000 } },
+    { "ok": { "Plug": 7, "Seconds": 19, "__tsMs": 1772239200000 } },
+    { "ok": { "Plug": 0, "Seconds": 20, "__tsMs": 1772242800000 } },
+    { "ok": { "Plug": 0, "Seconds": 21, "__tsMs": 1772246400000 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 12000, "E total": 280012000 } },
+    { "ok": { "E pres": 52000, "E total": 280052000 } },
+    { "ok": { "E pres": 52000, "E total": 280052000 } },
+    { "ok": { "E pres": 70000, "E total": 280070000 } }
+  ]
+}

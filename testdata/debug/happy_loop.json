@@ -1,0 +1,11 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "ok": { "Plug": 0, "Seconds": 10 } },
+    { "ok": { "Plug": 7, "Seconds": 11 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 1000, "E total": 280000000 } },
+    { "ok": { "E pres": 2000, "E total": 280001000 } }
+  ]
+}

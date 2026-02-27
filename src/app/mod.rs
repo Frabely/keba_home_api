@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod logging;
 mod runtime;
+pub mod services;
 
 pub use error::AppError;
 
@@ -17,10 +18,14 @@ pub fn run() -> Result<(), AppError> {
         keba_modbus_port = config.keba_modbus_port,
         keba_modbus_unit_id = config.keba_modbus_unit_id,
         keba_modbus_energy_factor_wh = config.keba_modbus_energy_factor_wh,
+        keba_debug_data_file = ?config.keba_debug_data_file,
+        results_output_file = ?config.results_output_file,
         poll_interval_ms = config.poll_interval_ms,
         db_path = %config.db_path,
         http_bind = %config.http_bind,
         debounce_samples = config.debounce_samples,
+        status_log_interval_seconds = config.status_log_interval_seconds,
+        status_station_count = config.status_stations.len(),
         "application bootstrap initialized"
     );
 

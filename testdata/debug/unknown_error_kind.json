@@ -1,0 +1,9 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "error": "dns_blackhole" }
+  ],
+  "report3": [
+    { "ok": { "E pres": 0, "E total": 280000000 } }
+  ]
+}

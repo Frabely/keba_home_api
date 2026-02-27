@@ -28,6 +28,7 @@ pub struct SessionStateMachine {
 struct Candidate {
     plugged: bool,
     count: usize,
+    first_observed_at: TimestampMs,
 }
 
 impl SessionStateMachine {
@@ -47,7 +48,7 @@ impl SessionStateMachine {
     ) -> Option<SessionTransition> {
         match self.stable_plugged {
             None => {
-                if self.accept_candidate(plugged_observation) {
+                if self.accept_candidate_at(plugged_observation, TimestampMs(0)) {
                     self.stable_plugged = Some(plugged_observation);
                     self.candidate = None;
                 }
@@ -58,21 +59,78 @@ impl SessionStateMachine {
                 None
             }
             Some(stable) => {
-                if !self.accept_candidate(plugged_observation) {
+                if !self.accept_candidate_with_clock(plugged_observation, clock) {
                     return None;
                 }
 
+                let transition_at = self
+                    .candidate
+                    .map(|candidate| candidate.first_observed_at)
+                    .unwrap_or_else(|| clock.now());
                 self.stable_plugged = Some(plugged_observation);
                 self.candidate = None;
 
                 if !stable && plugged_observation {
-                    let plugged_at = clock.now();
+                    let plugged_at = transition_at;
                     self.active_session_started_at = Some(plugged_at);
                     return Some(SessionTransition::Plugged { plugged_at });
                 }
 
                 if stable && !plugged_observation {
-                    let unplugged_at = clock.now();
+                    let unplugged_at = transition_at;
+                    let plugged_at = self
+                        .active_session_started_at
+                        .take()
+                        .unwrap_or(unplugged_at);
+
+                    return Some(SessionTransition::Unplugged {
+                        plugged_at,
+                        unplugged_at,
+                    });
+                }
+
+                None
+            }
+        }
+    }
+
+    pub fn observe_at(
+        &mut self,
+        plugged_observation: bool,
+        observed_at: TimestampMs,
+    ) -> Option<SessionTransition> {
+        match self.stable_plugged {
+            None => {
+                if self.accept_candidate_at(plugged_observation, observed_at) {
+                    self.stable_plugged = Some(plugged_observation);
+                    self.candidate = None;
+                }
+                None
+            }
+            Some(stable) if stable == plugged_observation => {
+                self.candidate = None;
+                None
+            }
+            Some(stable) => {
+                if !self.accept_candidate_at(plugged_observation, observed_at) {
+                    return None;
+                }
+
+                let transition_at = self
+                    .candidate
+                    .map(|candidate| candidate.first_observed_at)
+                    .unwrap_or(observed_at);
+                self.stable_plugged = Some(plugged_observation);
+                self.candidate = None;
+
+                if !stable && plugged_observation {
+                    let plugged_at = transition_at;
+                    self.active_session_started_at = Some(plugged_at);
+                    return Some(SessionTransition::Plugged { plugged_at });
+                }
+
+                if stable && !plugged_observation {
+                    let unplugged_at = transition_at;
                     let plugged_at = self
                         .active_session_started_at
                         .take()
@@ -93,7 +151,7 @@ impl SessionStateMachine {
         self.active_session_started_at
     }
 
-    fn accept_candidate(&mut self, plugged_observation: bool) -> bool {
+    fn accept_candidate_at(&mut self, plugged_observation: bool, observed_at: TimestampMs) -> bool {
         match self.candidate {
             Some(mut candidate) if candidate.plugged == plugged_observation => {
                 candidate.count += 1;
@@ -104,6 +162,29 @@ impl SessionStateMachine {
                 self.candidate = Some(Candidate {
                     plugged: plugged_observation,
                     count: 1,
+                    first_observed_at: observed_at,
+                });
+                self.debounce_samples == 1
+            }
+        }
+    }
+
+    fn accept_candidate_with_clock<C: Clock>(
+        &mut self,
+        plugged_observation: bool,
+        clock: &C,
+    ) -> bool {
+        match self.candidate {
+            Some(mut candidate) if candidate.plugged == plugged_observation => {
+                candidate.count += 1;
+                self.candidate = Some(candidate);
+                candidate.count >= self.debounce_samples
+            }
+            _ => {
+                self.candidate = Some(Candidate {
+                    plugged: plugged_observation,
+                    count: 1,
+                    first_observed_at: clock.now(),
                 });
                 self.debounce_samples == 1
             }
@@ -203,5 +284,43 @@ mod tests {
         assert_eq!(machine.observe(false, &clock), None);
         assert_eq!(machine.observe(true, &clock), None);
         assert_eq!(machine.observe(false, &clock), None);
+    }
+
+    #[test]
+    fn uses_first_changed_observation_timestamp_for_plugged_transition() {
+        let mut machine = SessionStateMachine::new(2);
+
+        assert_eq!(machine.observe_at(false, TimestampMs(1_000)), None);
+        assert_eq!(machine.observe_at(false, TimestampMs(1_100)), None);
+        assert_eq!(machine.observe_at(true, TimestampMs(2_000)), None);
+        assert_eq!(
+            machine.observe_at(true, TimestampMs(3_000)),
+            Some(SessionTransition::Plugged {
+                plugged_at: TimestampMs(2_000),
+            })
+        );
+    }
+
+    #[test]
+    fn uses_first_changed_observation_timestamp_for_unplugged_transition() {
+        let mut machine = SessionStateMachine::new(2);
+
+        assert_eq!(machine.observe_at(false, TimestampMs(1_000)), None);
+        assert_eq!(machine.observe_at(false, TimestampMs(1_100)), None);
+        assert_eq!(machine.observe_at(true, TimestampMs(2_000)), None);
+        assert_eq!(
+            machine.observe_at(true, TimestampMs(2_100)),
+            Some(SessionTransition::Plugged {
+                plugged_at: TimestampMs(2_000),
+            })
+        );
+        assert_eq!(machine.observe_at(false, TimestampMs(5_000)), None);
+        assert_eq!(
+            machine.observe_at(false, TimestampMs(6_000)),
+            Some(SessionTransition::Unplugged {
+                plugged_at: TimestampMs(2_000),
+                unplugged_at: TimestampMs(5_000),
+            })
+        );
     }
 }

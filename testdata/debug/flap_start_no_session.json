@@ -1,0 +1,15 @@
+{
+  "loop_forever": false,
+  "report2": [
+    { "ok": { "Plug": 0, "Seconds": 10, "__tsMs": 1772203200000 } },
+    { "ok": { "Plug": 0, "Seconds": 11, "__tsMs": 1772203260000 } },
+    { "ok": { "Plug": 7, "Seconds": 12, "__tsMs": 1772203320000 } },
+    { "ok": { "Plug": 0, "Seconds": 13, "__tsMs": 1772203380000 } },
+    { "ok": { "Plug": 7, "Seconds": 14, "__tsMs": 1772203440000 } },
+    { "ok": { "Plug": 0, "Seconds": 15, "__tsMs": 1772203500000 } },
+    { "ok": { "Plug": 0, "Seconds": 16, "__tsMs": 1772203560000 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 0, "E total": 280000000 } }
+  ]
+}

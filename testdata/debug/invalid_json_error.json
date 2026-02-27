@@ -1,0 +1,9 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "ok": { "Plug": 0, "Seconds": 1 } }
+  ],
+  "report3": [
+    { "error": "invalid_json" }
+  ]
+}

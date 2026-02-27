@@ -1,0 +1,15 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "ok": { "Plug": 0, "Seconds": 100 } },
+    { "ok": { "Plug": 7, "Seconds": 101 } },
+    { "error": "timeout" },
+    { "ok": { "Plug": 7, "Seconds": 103 } },
+    { "ok": { "Plug": 0, "Seconds": 104 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 0, "E total": 280000000 } },
+    { "error": "connection_refused" },
+    { "ok": { "E pres": 25000, "E total": 280025000 } }
+  ]
+}
