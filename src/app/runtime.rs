@@ -76,6 +76,13 @@ struct RuntimeConsoleStation {
     port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StationStatusSnapshot {
+    status: &'static str,
+    plugged: bool,
+    charging: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionResultEntry {
     from: String,
@@ -129,11 +136,18 @@ impl<Cl: Clock> SessionPoller<Cl> {
     }
 
     pub fn tick(&mut self) -> Result<(), PollerError> {
+        tracing::debug!("poll cycle started");
         let report2_raw = self
             .client
             .get_report2()
             .map_err(PollerError::FetchReport2)?;
+        tracing::debug!(payload = %report2_raw, "received report2 payload");
         let report2 = parse_report2(&report2_raw).map_err(PollerError::ParseReport2)?;
+        tracing::debug!(
+            plugged = report2.plugged,
+            seconds = report2.seconds,
+            "parsed report2 payload"
+        );
 
         if let (Some(previous), Some(current)) = (self.last_seconds, report2.seconds)
             && current < previous
@@ -160,9 +174,16 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 plugged_at,
                 unplugged_at,
             }) => self.handle_unplugged(plugged_at, unplugged_at, report2_raw)?,
-            None => {}
+            None => {
+                tracing::debug!(
+                    plugged = report2.plugged,
+                    seconds = report2.seconds,
+                    "no session transition detected"
+                );
+            }
         }
 
+        tracing::debug!("poll cycle completed");
         Ok(())
     }
 
@@ -246,6 +267,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 return;
             }
         };
+        tracing::debug!(payload = %report3_raw, "received report3 payload on plugged transition");
 
         self.start_report2_raw = Some(report2_raw.to_string());
         self.start_report3_raw = Some(report3_raw.to_string());
@@ -324,6 +346,10 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 return Ok(());
             }
         };
+        tracing::debug!(
+            payload = %report3_raw,
+            "received report3 payload on unplugged transition"
+        );
 
         let end_snapshot = EnergySnapshot {
             present_session_kwh: report3.present_session_kwh,
@@ -361,6 +387,12 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 (0.0, "invalid", "energy_compute_failed")
             }
         };
+        tracing::debug!(
+            energy_kwh,
+            status,
+            finished_reason,
+            "computed session completion values"
+        );
         let new_session = self.build_session_record(
             plugged_at,
             unplugged_at,
@@ -527,39 +559,80 @@ fn append_session_result(
     Ok(())
 }
 
-fn log_console_station_statuses(stations: &[RuntimeConsoleStation]) {
-    for station in stations {
+fn log_console_station_statuses(
+    stations: &[RuntimeConsoleStation],
+    last_snapshots: &mut [Option<StationStatusSnapshot>],
+) {
+    for (index, station) in stations.iter().enumerate() {
         match fetch_report_pair(station) {
             Ok((report2, report3)) => {
-                let status = derive_console_status(&report2, &report3);
-                println!(
-                    "[{}] {} ({}) | {} | Stecker: {} | Laden: {} | E pres: {}",
-                    Utc::now().to_rfc3339(),
-                    station.name,
-                    station.ip,
-                    status,
-                    bool_text(find_number(&report2, &["Plug"]).unwrap_or(0.0) != 0.0),
-                    bool_text(find_number(&report3, &["P"]).unwrap_or(0.0) > 0.0),
-                    session_energy_text(&report3)
+                let snapshot = derive_station_status_snapshot(&report2, &report3);
+                let previous = &last_snapshots[index];
+                if previous.as_ref() != Some(&snapshot) {
+                    tracing::info!(
+                        station = %station.name,
+                        ip = %station.ip,
+                        previous_status = previous
+                            .as_ref()
+                            .map(|state| state.status)
+                            .unwrap_or("unknown"),
+                        status = snapshot.status,
+                        plugged = snapshot.plugged,
+                        charging = snapshot.charging,
+                        energy = %session_energy_text(&report3),
+                        "station status changed"
+                    );
+                }
+                tracing::info!(
+                    station = %station.name,
+                    ip = %station.ip,
+                    status = snapshot.status,
+                    plugged = snapshot.plugged,
+                    charging = snapshot.charging,
+                    energy = %session_energy_text(&report3),
+                    "station heartbeat"
                 );
+                last_snapshots[index] = Some(snapshot);
             }
             Err(error) => {
-                println!(
-                    "[{}] {} ({}) | FEHLER beim Statuspolling: {}",
-                    Utc::now().to_rfc3339(),
-                    station.name,
-                    station.ip,
-                    error
+                tracing::warn!(
+                    station = %station.name,
+                    ip = %station.ip,
+                    error = %error,
+                    "station status polling failed"
                 );
             }
         }
     }
 }
 
+fn derive_station_status_snapshot(report2: &Value, report3: &Value) -> StationStatusSnapshot {
+    let plugged = find_number(report2, &["Plug"]).unwrap_or(0.0) != 0.0;
+    let charging = find_number(report3, &["P"]).unwrap_or(0.0) > 0.0;
+    StationStatusSnapshot {
+        status: derive_console_status(report2, report3),
+        plugged,
+        charging,
+    }
+}
+
 fn fetch_report_pair(station: &RuntimeConsoleStation) -> Result<(Value, Value), KebaClientError> {
+    tracing::debug!(
+        station = %station.name,
+        ip = %station.ip,
+        port = station.port,
+        "fetching station status reports"
+    );
     let client = KebaUdpClient::new(&station.ip, station.port)?;
     let report2 = client.get_report2()?;
     let report3 = client.get_report3()?;
+    tracing::debug!(
+        station = %station.name,
+        ip = %station.ip,
+        report2 = %report2,
+        report3 = %report3,
+        "fetched station status reports"
+    );
     Ok((report2, report3))
 }
 
@@ -644,10 +717,6 @@ fn parse_number_from_text(text: &str) -> Option<f64> {
     token.parse::<f64>().ok()
 }
 
-fn bool_text(value: bool) -> &'static str {
-    if value { "ja" } else { "nein" }
-}
-
 fn extract_observed_at(report2_raw: &Value) -> Option<TimestampMs> {
     let object = report2_raw.as_object()?;
     let ts_ms = object.get("__tsMs")?.as_i64()?;
@@ -666,13 +735,14 @@ where
 {
     std::thread::spawn(move || {
         let mut next_status_log = Instant::now();
+        let mut last_station_snapshots = vec![None; status_stations.len()];
         while !stop_flag.load(Ordering::Relaxed) {
             if let Err(error) = poller.tick() {
                 poller.note_poll_error(&error);
                 tracing::warn!(error = %error, "poll cycle failed");
             }
             if next_status_log.elapsed() >= status_log_interval {
-                log_console_station_statuses(&status_stations);
+                log_console_station_statuses(&status_stations, &mut last_station_snapshots);
                 next_status_log = Instant::now();
             }
             std::thread::sleep(poll_interval);
@@ -759,7 +829,8 @@ fn open_shared_connection_writer(db_path: &str) -> Result<Arc<Mutex<Connection>>
 fn open_shared_connection_reader(db_path: &str) -> Result<Arc<Mutex<Connection>>, AppError> {
     let connection =
         crate::adapters::db::open_read_only_connection(db_path).map_err(AppError::database_init)?;
-    let version = crate::adapters::db::schema_version(&connection).map_err(AppError::database_init)?;
+    let version =
+        crate::adapters::db::schema_version(&connection).map_err(AppError::database_init)?;
     if version == 0 {
         return Err(AppError::database_init(
             "database schema is not initialized; start writer service first",
@@ -1331,14 +1402,13 @@ mod tests {
             },
             Some("database is locked".to_string()),
         )));
-        let locked_error =
-            ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error {
-                    code: rusqlite::ErrorCode::DatabaseLocked,
-                    extended_code: 6,
-                },
-                Some("database table is locked".to_string()),
-            )));
+        let locked_error = ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseLocked,
+                extended_code: 6,
+            },
+            Some("database table is locked".to_string()),
+        )));
         let other_error =
             ServiceError::Database(DbError::Sqlite(rusqlite::Error::ExecuteReturnedResults));
 

@@ -112,6 +112,24 @@ sudo journalctl -u keba-home-service@carport -f
 sudo journalctl -u keba-home-service@eingang -f
 sudo journalctl -u keba-home-api-reader -f
 ```
+Log-Verhalten (Default `RUST_LOG=info`):
+- `INFO`: Startup + Zustandsaenderungen + Session-Lifecycle + Heartbeat (standardmaessig 1x/Minute via `STATUS_LOG_INTERVAL_SECONDS=60`)
+- `WARN/ERROR`: sofort bei Problemen
+- `DEBUG`: detaillierte Poll-/Request-Details nur bei aktivem Debug-Level
+
+Debug temporär aktivieren (beide Writer + API), dann zurueck auf `info`:
+```bash
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=debug/' /etc/keba/keba-home-service-carport.env
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=debug/' /etc/keba/keba-home-service-eingang.env
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=debug/' /etc/keba/keba-home-api-reader.env
+sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-home-api-reader
+
+# rollback auf normalen Betrieb
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=info/' /etc/keba/keba-home-service-carport.env
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=info/' /etc/keba/keba-home-service-eingang.env
+sudo sed -i 's/^RUST_LOG=.*/RUST_LOG=info/' /etc/keba/keba-home-api-reader.env
+sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-home-api-reader
+```
 
 ## API Smoke Check
 ```bash

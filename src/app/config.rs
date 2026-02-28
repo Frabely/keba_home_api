@@ -101,7 +101,7 @@ impl AppConfig {
             status_log_interval_seconds: parse_or_default(
                 &lookup,
                 "STATUS_LOG_INTERVAL_SECONDS",
-                5_u64,
+                60_u64,
             )?,
             status_stations: parse_status_stations(&lookup)?,
         };
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(result.http_bind, "0.0.0.0:8080");
         assert_eq!(result.debounce_samples, 2);
         assert_eq!(result.station_id, None);
-        assert_eq!(result.status_log_interval_seconds, 5);
+        assert_eq!(result.status_log_interval_seconds, 60);
         assert_eq!(
             result.status_stations,
             vec![
