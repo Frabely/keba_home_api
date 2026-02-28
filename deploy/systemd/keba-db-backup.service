@@ -1,0 +1,16 @@
+[Unit]
+Description=KEBA SQLite Backup Job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=keba
+Group=keba
+EnvironmentFile=/etc/keba/keba-db-backup.env
+ExecStart=/bin/bash /opt/keba_home_api/scripts/backup_keba_db.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/keba /var/backups/keba

@@ -13,11 +13,24 @@ Es laufen drei Prozesse:
 
 Alle drei nutzen dieselbe SQLite-DB (`DB_PATH` identisch).
 
+## Quickstart (2 Befehle)
+1. Setup/Installation:
+```bash
+bash ./scripts/setup_all.sh
+```
+
+2. Nach Setzen der beiden `KEBA_IP` Werte alle Prozesse starten:
+```bash
+bash ./scripts/start_all_services.sh
+```
+
 ## Projektstruktur (relevant)
 - `keba-service/` eigene ausführbare Crate fuer Writer
 - `keba-api/` eigene ausführbare Crate fuer API
 - `src/` gemeinsame Kernlogik (Domain/App/Adapter)
 - `deploy/systemd/` Units + ENV-Beispiele
+- `scripts/setup_all.sh` einmaliger Setup
+- `scripts/start_all_services.sh` Start von 2x Writer + API
 
 ## Build
 ```bash
@@ -29,6 +42,9 @@ Artefakte:
 - `target/release/keba_api`
 
 ## Linux/Raspberry Installation
+Hinweis: Dieser Abschnitt ist der manuelle Fallback.
+Bevorzugt `Quickstart (2 Befehle)` verwenden.
+
 1. Verzeichnisse anlegen:
 ```bash
 sudo mkdir -p /opt/keba_home_api /etc/keba /var/lib/keba
@@ -49,6 +65,11 @@ sudo cp deploy/systemd/keba-home-api-reader.env.example /etc/keba/keba-home-api-
 sudo chown root:root /etc/keba/keba-home-service-carport.env /etc/keba/keba-home-service-eingang.env /etc/keba/keba-home-api-reader.env
 sudo chmod 0640 /etc/keba/keba-home-service-carport.env /etc/keba/keba-home-service-eingang.env /etc/keba/keba-home-api-reader.env
 ```
+
+Wichtig:
+- `KEBA_IP` ist fuer jede Writer-Instanz verpflichtend.
+- Setze `KEBA_IP` in `/etc/keba/keba-home-service-carport.env` auf die Carport-Wallbox-IP.
+- Setze `KEBA_IP` in `/etc/keba/keba-home-service-eingang.env` auf die Eingang-Wallbox-IP.
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash
@@ -156,6 +177,41 @@ sudo journalctl --vacuum-size=500M
 ### microSD Empfehlung
 - 64/65GB ist fuer Start ok.
 - Fuer langfristig robusten 24/7 Betrieb besser SSD (USB) fuer DB/Logs.
+
+## Automatisierte taegliche Backups (empfohlen)
+1. Script deployen:
+```bash
+sudo mkdir -p /opt/keba_home_api/scripts /var/backups/keba
+sudo install -m 0755 ./scripts/backup_keba_db.sh /opt/keba_home_api/scripts/backup_keba_db.sh
+sudo chown -R keba:keba /var/backups/keba
+```
+
+2. Backup-ENV anlegen:
+```bash
+sudo cp deploy/systemd/keba-db-backup.env.example /etc/keba/keba-db-backup.env
+sudo chown root:root /etc/keba/keba-db-backup.env
+sudo chmod 0640 /etc/keba/keba-db-backup.env
+```
+
+3. systemd Backup-Unit/Timer installieren:
+```bash
+sudo cp deploy/systemd/keba-db-backup.service /etc/systemd/system/keba-db-backup.service
+sudo cp deploy/systemd/keba-db-backup.timer /etc/systemd/system/keba-db-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now keba-db-backup.timer
+```
+
+4. Verifikation:
+```bash
+systemctl list-timers keba-db-backup.timer
+sudo systemctl start keba-db-backup.service
+ls -lah /var/backups/keba
+```
+
+Hinweis:
+- Es wird ein konsistenter Online-Backup mit `sqlite3 .backup` erstellt.
+- Alte Backups werden gemaess `KEEP_DAYS` automatisch geloescht.
+- Mit `KEEP_DAYS=7` und taeglichem Timer werden Backups ab dem 8. Tag automatisch aufgeraeumt.
 
 ## Backup / Restore
 Backup:

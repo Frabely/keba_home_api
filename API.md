@@ -10,6 +10,11 @@ Recommended production setup runs two separate processes against the same SQLite
 - `keba_service` writes polling/session/log data into `DB_PATH`
 - `keba_api` reads data from the same `DB_PATH` and serves HTTP
 
+Current scope: `keba_api` is intentionally read-only.
+- It opens SQLite in read-only/query-only mode.
+- It exposes only GET endpoints and does not mutate state.
+- If write endpoints are introduced later, this section must be updated.
+
 ## Quick Check
 
 ```bash
