@@ -1,6 +1,6 @@
 [Unit]
-Description=KEBA Home API Service
-After=network-online.target
+Description=KEBA Home API Reader
+After=network-online.target keba-home-service@carport.service keba-home-service@eingang.service
 Wants=network-online.target
 
 [Service]
@@ -8,8 +8,8 @@ Type=simple
 User=keba
 Group=keba
 WorkingDirectory=/opt/keba_home_api
-EnvironmentFile=/etc/keba/keba-home-api.env
-ExecStart=/opt/keba_home_api/keba_home_api
+EnvironmentFile=/etc/keba/keba-home-api-reader.env
+ExecStart=/opt/keba_home_api/keba_api
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

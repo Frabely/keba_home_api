@@ -858,6 +858,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "keba-api"
+version = "0.1.0"
+dependencies = [
+ "keba_home_api",
+]
+
+[[package]]
+name = "keba-service"
+version = "0.1.0"
+dependencies = [
+ "keba_home_api",
+]
+
+[[package]]
 name = "keba_home_api"
 version = "0.1.0"
 dependencies = [

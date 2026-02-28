@@ -105,6 +105,10 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
 11. Vor neuen Feature-Vorschlägen zuerst Cleanup-Tasks priorisieren und aktiv vorschlagen.
 12. Feature-Vorschläge erst nach erledigtem oder bewusst dokumentiert zurückgestelltem Cleanup machen.
 13. Linting (`cargo clippy -- -D warnings`) erst nach Abschluss einer Aufgabe ausführen und alle Findings dann gebündelt beheben.
+14. Dokumentationspflege ist verpflichtend:
+    - `setup.md` ist die zentrale Setup-/Betriebsdokumentation und bei allen relevanten Änderungen (Architektur, Services, systemd, ENV, Raspberry Pi Betrieb, SQLite-Verhalten, Deploy/Upgrade/Backup) zu aktualisieren.
+    - `API.md` bleibt für API-Verträge zuständig und ist bei API-Änderungen zu aktualisieren.
+    - `RUNBOOK.md` enthält nur noch einen Verweis auf `setup.md` und darf nicht als primäre Betriebsquelle auseinanderlaufen.
 
 ## Abnahmekriterien (DoD)
 1. Jede Änderung enthält mindestens einen relevanten Test oder eine begründete Testausnahme.

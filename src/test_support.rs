@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,23 +22,29 @@ pub fn open_test_connection(test_name: &str) -> Connection {
 }
 
 fn ensure_template_db() -> PathBuf {
-    let template_path = std::env::var("TEST_DB_TEMPLATE_PATH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(default_template_path);
+    static TEMPLATE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-    if let Some(parent) = template_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).expect("template parent dir should be creatable");
-    }
+    TEMPLATE_PATH
+        .get_or_init(|| {
+            let template_path = std::env::var("TEST_DB_TEMPLATE_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(default_template_path);
 
-    let mut connection =
-        open_connection(template_path.to_string_lossy().as_ref()).expect("template db opens");
-    run_migrations(&mut connection).expect("template migrations should succeed");
+            if let Some(parent) = template_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent).expect("template parent dir should be creatable");
+            }
 
-    template_path
+            let mut connection = open_connection(template_path.to_string_lossy().as_ref())
+                .expect("template db opens");
+            run_migrations(&mut connection).expect("template migrations should succeed");
+
+            template_path
+        })
+        .clone()
 }
 
 fn default_template_path() -> PathBuf {

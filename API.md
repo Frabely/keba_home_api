@@ -4,6 +4,12 @@ Base URL (default): `http://localhost:8080`
 
 All timestamps are UTC ISO-8601 (`...Z`), JSON fields are `camelCase`.
 
+## Runtime Split
+
+Recommended production setup runs two separate processes against the same SQLite file:
+- `keba_service` writes polling/session/log data into `DB_PATH`
+- `keba_api` reads data from the same `DB_PATH` and serves HTTP
+
 ## Quick Check
 
 ```bash

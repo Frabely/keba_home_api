@@ -8,6 +8,7 @@ use std::{fs, path::Path};
 
 use actix_web::{App, HttpServer, web};
 use chrono::{SecondsFormat, Utc};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -19,10 +20,13 @@ use crate::adapters::keba_modbus::KebaModbusClient;
 use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
 use crate::app::config::{AppConfig, KebaSource, StatusStationConfig};
 use crate::app::error::AppError;
-use crate::app::services::{SessionCommandHandler, SqliteSessionService};
+use crate::app::services::{ServiceError, SessionCommandHandler, SqliteSessionService};
 use crate::domain::keba_payload::{ParseError, parse_report2, parse_report3};
 use crate::domain::session_energy::{EnergySnapshot, compute_session_kwh};
 use crate::domain::session_state::{Clock, SessionStateMachine, SessionTransition, TimestampMs};
+
+const SESSION_PERSIST_MAX_RETRIES: usize = 3;
+const SESSION_PERSIST_RETRY_BACKOFF_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SystemClock;
@@ -419,13 +423,55 @@ impl<Cl: Clock> SessionPoller<Cl> {
         &mut self,
         new_session: &NewSessionRecord,
     ) -> Result<String, PollerError> {
-        let session_id = self
-            .session_commands
-            .insert_session(new_session)
-            .map_err(service_error_to_poller_error)?;
-        self.session_commands
-            .link_session_log_events(&session_id, &self.pending_session_log_event_ids)
-            .map_err(service_error_to_poller_error)?;
+        let mut insert_attempt = 0_usize;
+        let session_id = loop {
+            match self.session_commands.insert_session(new_session) {
+                Ok(session_id) => break session_id,
+                Err(error)
+                    if is_retryable_db_contention(&error)
+                        && insert_attempt < SESSION_PERSIST_MAX_RETRIES =>
+                {
+                    insert_attempt += 1;
+                    let sleep_ms = SESSION_PERSIST_RETRY_BACKOFF_MS * insert_attempt as u64;
+                    tracing::warn!(
+                        attempt = insert_attempt,
+                        max_attempts = SESSION_PERSIST_MAX_RETRIES,
+                        sleep_ms,
+                        error = %error,
+                        "session insert hit db contention; retrying"
+                    );
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                }
+                Err(error) => return Err(service_error_to_poller_error(error)),
+            }
+        };
+
+        let mut link_attempt = 0_usize;
+        loop {
+            match self
+                .session_commands
+                .link_session_log_events(&session_id, &self.pending_session_log_event_ids)
+            {
+                Ok(()) => break,
+                Err(error)
+                    if is_retryable_db_contention(&error)
+                        && link_attempt < SESSION_PERSIST_MAX_RETRIES =>
+                {
+                    link_attempt += 1;
+                    let sleep_ms = SESSION_PERSIST_RETRY_BACKOFF_MS * link_attempt as u64;
+                    tracing::warn!(
+                        attempt = link_attempt,
+                        max_attempts = SESSION_PERSIST_MAX_RETRIES,
+                        sleep_ms,
+                        error = %error,
+                        session_id,
+                        "session-log linking hit db contention; retrying"
+                    );
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                }
+                Err(error) => return Err(service_error_to_poller_error(error)),
+            }
+        }
 
         self.start_snapshot = None;
         self.start_report2_raw = None;
@@ -634,32 +680,130 @@ where
     })
 }
 
-pub fn run(config: AppConfig) -> Result<(), AppError> {
-    let mut connection =
-        crate::adapters::db::open_connection(&config.db_path).map_err(AppError::database_init)?;
-    crate::adapters::db::run_migrations(&mut connection).map_err(AppError::database_init)?;
-
-    let shared_connection = Arc::new(Mutex::new(connection));
+pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
+    let shared_connection = open_shared_connection_writer(&config.db_path)?;
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         session_queries: session_service.clone(),
     };
 
-    let status_stations: Vec<RuntimeConsoleStation> = if config.keba_source == KebaSource::DebugFile
-    {
-        Vec::new()
-    } else {
-        config
-            .status_stations
-            .iter()
-            .map(|station: &StatusStationConfig| RuntimeConsoleStation {
-                name: station.name.clone(),
-                ip: station.ip.clone(),
-                port: station.port,
-            })
-            .collect()
+    let status_stations = build_status_stations(&config);
+    let mut poller = build_poller(&config, session_service)?;
+
+    if config.keba_source == KebaSource::DebugFile {
+        return run_debug_replay_loop(&mut poller, config.poll_interval_ms);
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let poller_handle = start_poller(
+        poller,
+        Duration::from_millis(config.poll_interval_ms),
+        Duration::from_secs(config.status_log_interval_seconds),
+        status_stations,
+        Arc::clone(&stop_flag),
+    );
+
+    let server_result = run_http_server(&config.http_bind, api_state);
+
+    stop_flag.store(true, Ordering::Relaxed);
+    let join_result = poller_handle.join();
+
+    if join_result.is_err() {
+        return Err(AppError::runtime("poller thread panicked"));
+    }
+
+    server_result
+}
+
+pub fn run_service(config: AppConfig) -> Result<(), AppError> {
+    let shared_connection = open_shared_connection_writer(&config.db_path)?;
+    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
+    let status_stations = build_status_stations(&config);
+    let mut poller = build_poller(&config, session_service)?;
+
+    if config.keba_source == KebaSource::DebugFile {
+        return run_debug_replay_loop(&mut poller, config.poll_interval_ms);
+    }
+
+    let poller_handle = start_poller(
+        poller,
+        Duration::from_millis(config.poll_interval_ms),
+        Duration::from_secs(config.status_log_interval_seconds),
+        status_stations,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    match poller_handle.join() {
+        Ok(()) => Ok(()),
+        Err(_) => Err(AppError::runtime("poller thread panicked")),
+    }
+}
+
+pub fn run_api(config: AppConfig) -> Result<(), AppError> {
+    let shared_connection = open_shared_connection_reader(&config.db_path)?;
+    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
+    let api_state = ApiState {
+        session_queries: session_service,
     };
 
+    run_http_server(&config.http_bind, api_state)
+}
+
+fn open_shared_connection_writer(db_path: &str) -> Result<Arc<Mutex<Connection>>, AppError> {
+    let mut connection =
+        crate::adapters::db::open_connection(db_path).map_err(AppError::database_init)?;
+    crate::adapters::db::run_migrations(&mut connection).map_err(AppError::database_init)?;
+    Ok(Arc::new(Mutex::new(connection)))
+}
+
+fn open_shared_connection_reader(db_path: &str) -> Result<Arc<Mutex<Connection>>, AppError> {
+    let connection =
+        crate::adapters::db::open_read_only_connection(db_path).map_err(AppError::database_init)?;
+    let version = crate::adapters::db::schema_version(&connection).map_err(AppError::database_init)?;
+    if version == 0 {
+        return Err(AppError::database_init(
+            "database schema is not initialized; start writer service first",
+        ));
+    }
+    Ok(Arc::new(Mutex::new(connection)))
+}
+
+fn build_status_stations(config: &AppConfig) -> Vec<RuntimeConsoleStation> {
+    if config.keba_source == KebaSource::DebugFile {
+        return Vec::new();
+    }
+
+    config
+        .status_stations
+        .iter()
+        .map(|station: &StatusStationConfig| RuntimeConsoleStation {
+            name: station.name.clone(),
+            ip: station.ip.clone(),
+            port: station.port,
+        })
+        .collect()
+}
+
+fn build_poller(
+    config: &AppConfig,
+    session_service: SqliteSessionService,
+) -> Result<SessionPoller<SystemClock>, AppError> {
+    let keba_client = build_keba_client(config)?;
+    Ok(SessionPoller::new(
+        keba_client,
+        SystemClock,
+        session_service,
+        config.debounce_samples,
+        SessionPollerConfig {
+            source: keba_source_label(config.keba_source).to_string(),
+            poll_interval_ms: config.poll_interval_ms,
+            station_id: config.station_id.clone(),
+            results_output_file: config.results_output_file.clone(),
+        },
+    ))
+}
+
+fn build_keba_client(config: &AppConfig) -> Result<Box<dyn KebaClient>, AppError> {
     let keba_client: Box<dyn KebaClient> = match config.keba_source {
         KebaSource::Udp => Box::new(
             KebaUdpClient::new(&config.keba_ip, config.keba_udp_port).map_err(AppError::runtime)?,
@@ -683,65 +827,41 @@ pub fn run(config: AppConfig) -> Result<(), AppError> {
             .map_err(AppError::runtime)?,
         ),
     };
-    let mut poller = SessionPoller::new(
-        keba_client,
-        SystemClock,
-        session_service,
-        config.debounce_samples,
-        SessionPollerConfig {
-            source: keba_source_label(config.keba_source).to_string(),
-            poll_interval_ms: config.poll_interval_ms,
-            station_id: config.station_id.clone(),
-            results_output_file: config.results_output_file.clone(),
-        },
-    );
+    Ok(keba_client)
+}
 
-    if config.keba_source == KebaSource::DebugFile {
-        loop {
-            match poller.tick() {
-                Ok(()) => std::thread::sleep(Duration::from_millis(config.poll_interval_ms)),
-                Err(error) if is_debug_replay_finished(&error) => {
-                    tracing::info!("debug replay finished");
-                    return Ok(());
-                }
-                Err(error) => {
-                    poller.note_poll_error(&error);
-                    tracing::warn!(error = %error, "poll cycle failed");
-                    std::thread::sleep(Duration::from_millis(config.poll_interval_ms));
-                }
+fn run_debug_replay_loop(
+    poller: &mut SessionPoller<SystemClock>,
+    poll_interval_ms: u64,
+) -> Result<(), AppError> {
+    loop {
+        match poller.tick() {
+            Ok(()) => std::thread::sleep(Duration::from_millis(poll_interval_ms)),
+            Err(error) if is_debug_replay_finished(&error) => {
+                tracing::info!("debug replay finished");
+                return Ok(());
+            }
+            Err(error) => {
+                poller.note_poll_error(&error);
+                tracing::warn!(error = %error, "poll cycle failed");
+                std::thread::sleep(Duration::from_millis(poll_interval_ms));
             }
         }
     }
+}
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let poller_handle = start_poller(
-        poller,
-        Duration::from_millis(config.poll_interval_ms),
-        Duration::from_secs(config.status_log_interval_seconds),
-        status_stations,
-        Arc::clone(&stop_flag),
-    );
-
-    tracing::info!(bind = %config.http_bind, "http server starting");
-
+fn run_http_server(http_bind: &str, api_state: ApiState) -> Result<(), AppError> {
+    tracing::info!(bind = %http_bind, "http server starting");
     let server_result = actix_web::rt::System::new().block_on(async move {
         HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(api_state.clone()))
                 .configure(configure_routes)
         })
-        .bind(&config.http_bind)?
+        .bind(http_bind)?
         .run()
         .await
     });
-
-    stop_flag.store(true, Ordering::Relaxed);
-    let join_result = poller_handle.join();
-
-    if join_result.is_err() {
-        return Err(AppError::runtime("poller thread panicked"));
-    }
-
     server_result.map_err(AppError::runtime)
 }
 
@@ -749,6 +869,17 @@ fn service_error_to_poller_error(error: crate::app::services::ServiceError) -> P
     match error {
         crate::app::services::ServiceError::DbLockPoisoned => PollerError::DbLockPoisoned,
         crate::app::services::ServiceError::Database(db_error) => PollerError::Database(db_error),
+    }
+}
+
+fn is_retryable_db_contention(error: &ServiceError) -> bool {
+    match error {
+        ServiceError::DbLockPoisoned => false,
+        ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(db_error, _))) => {
+            db_error.code == rusqlite::ErrorCode::DatabaseBusy
+                || db_error.code == rusqlite::ErrorCode::DatabaseLocked
+        }
+        _ => false,
     }
 }
 
@@ -794,11 +925,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::adapters::db::{
-        count_log_events, count_session_log_events, get_latest_session, list_sessions,
+        DbError, count_log_events, count_session_log_events, get_latest_session, list_sessions,
     };
     use crate::adapters::keba_debug_file::KebaDebugFileClient;
     use crate::adapters::keba_udp::KebaUdpClient;
-    use crate::app::services::SqliteSessionService;
+    use crate::app::services::{ServiceError, SqliteSessionService};
     use crate::test_support::open_test_connection;
 
     use super::{Clock, SessionPoller, SessionPollerConfig, TimestampMs};
@@ -1189,5 +1320,33 @@ mod tests {
         assert_eq!(sessions[0].started_at, "2026-02-27T14:42:00.000Z");
         assert_eq!(sessions[0].finished_at, "2026-02-27T14:46:00.000Z");
         assert_eq!(sessions[0].energy_kwh, 4.0);
+    }
+
+    #[test]
+    fn retries_only_for_sqlite_busy_or_locked_errors() {
+        let busy_error = ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".to_string()),
+        )));
+        let locked_error =
+            ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseLocked,
+                    extended_code: 6,
+                },
+                Some("database table is locked".to_string()),
+            )));
+        let other_error =
+            ServiceError::Database(DbError::Sqlite(rusqlite::Error::ExecuteReturnedResults));
+
+        assert!(super::is_retryable_db_contention(&busy_error));
+        assert!(super::is_retryable_db_contention(&locked_error));
+        assert!(!super::is_retryable_db_contention(&other_error));
+        assert!(!super::is_retryable_db_contention(
+            &ServiceError::DbLockPoisoned
+        ));
     }
 }

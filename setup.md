@@ -1,32 +1,35 @@
-# RUNBOOK.md
-
-Hinweis: Die zentrale und kuenftig zu pflegende Setup-/Betriebsdoku liegt in [setup.md](C:\\Users\\MoritzDesktop\\IdeaProjects\\keba_home_api\\setup.md).
+# setup.md
 
 ## Zweck
-Betriebsanleitung fuer getrennten Betrieb von:
-- `keba_service` (Writer, hier als zwei Instanzen fuer zwei Stationen)
-- `keba_api` (Reader: liefert HTTP-API aus derselben SQLite)
+Zentrale Setup- und Betriebsanleitung fuer dieses Projekt.
 
-## Architektur
-- Gemeinsame DB: `DB_PATH=/var/lib/keba/keba.db`
-- Writer-Instanzen schreiben Sessions/Log-Events
-- API liest Sessions/Diagnostik aus derselben DB
+Ab jetzt gilt: Wichtige Betriebs-/Deploy-/Raspberry-Informationen zuerst hier pflegen.
 
-## Voraussetzungen
-- Binaries vorhanden unter `/opt/keba_home_api/`
-: `keba_service`, `keba_api`
-- Service-User: `keba`
-- Persistenzpfad vorhanden und beschreibbar: `/var/lib/keba`
-- systemd units installiert:
-  - `deploy/systemd/keba-home-service@.service`
-  - `deploy/systemd/keba-home-api-reader.service`
-- ENV-Dateien erstellt aus:
-  - `deploy/systemd/keba-home-service-carport.env.example`
-  - `deploy/systemd/keba-home-service-eingang.env.example`
-  - `deploy/systemd/keba-home-api-reader.env.example`
+## Zielarchitektur
+Es laufen drei Prozesse:
+1. `keba_service` Instanz `carport` (Writer)
+2. `keba_service` Instanz `eingang` (Writer)
+3. `keba_api` (Reader)
 
-## Installation
-1. Verzeichnisse vorbereiten:
+Alle drei nutzen dieselbe SQLite-DB (`DB_PATH` identisch).
+
+## Projektstruktur (relevant)
+- `keba-service/` eigene ausführbare Crate fuer Writer
+- `keba-api/` eigene ausführbare Crate fuer API
+- `src/` gemeinsame Kernlogik (Domain/App/Adapter)
+- `deploy/systemd/` Units + ENV-Beispiele
+
+## Build
+```bash
+cargo build --release -p keba-service -p keba-api
+```
+
+Artefakte:
+- `target/release/keba_service`
+- `target/release/keba_api`
+
+## Linux/Raspberry Installation
+1. Verzeichnisse anlegen:
 ```bash
 sudo mkdir -p /opt/keba_home_api /etc/keba /var/lib/keba
 sudo chown -R keba:keba /opt/keba_home_api /var/lib/keba
@@ -34,7 +37,6 @@ sudo chown -R keba:keba /opt/keba_home_api /var/lib/keba
 
 2. Binaries deployen:
 ```bash
-cargo build --release -p keba-service -p keba-api
 sudo install -m 0755 ./target/release/keba_service /opt/keba_home_api/keba_service
 sudo install -m 0755 ./target/release/keba_api /opt/keba_home_api/keba_api
 ```
@@ -61,63 +63,102 @@ sudo systemctl daemon-reload
 sudo systemctl enable keba-home-service@carport keba-home-service@eingang keba-home-api-reader
 ```
 
-## Start / Stop / Restart
+## Start / Stop / Status
+Start:
 ```bash
 sudo systemctl start keba-home-service@carport
 sudo systemctl start keba-home-service@eingang
 sudo systemctl start keba-home-api-reader
+```
 
+Stop:
+```bash
 sudo systemctl stop keba-home-api-reader
 sudo systemctl stop keba-home-service@carport
 sudo systemctl stop keba-home-service@eingang
+```
 
-sudo systemctl restart keba-home-service@carport
-sudo systemctl restart keba-home-service@eingang
-sudo systemctl restart keba-home-api-reader
-
+Status:
+```bash
 sudo systemctl status keba-home-service@carport
 sudo systemctl status keba-home-service@eingang
 sudo systemctl status keba-home-api-reader
 ```
 
-## Logs (journald)
+Logs:
 ```bash
 sudo journalctl -u keba-home-service@carport -f
 sudo journalctl -u keba-home-service@eingang -f
 sudo journalctl -u keba-home-api-reader -f
 ```
 
-## Health-Check
+## API Smoke Check
 ```bash
 curl -s http://127.0.0.1:8080/health
 curl -s http://127.0.0.1:8080/diagnostics/db
 ```
 
-## Upgrade
-1. Neue Version bauen/deployen:
+## SQLite Parallelzugriff
+- Writer nutzen SQLite mit `WAL`, `busy_timeout`, `foreign_keys`.
+- API oeffnet die DB read-only (`query_only=ON`).
+- Viele Leser + ein Schreiber gleichzeitig sind moeglich.
+- Zwei Writer serialisieren ihre Writes.
+- Bei `BUSY/LOCKED` wird Session-Persistenz mit Backoff mehrfach retryt.
+
+## Raspberry Pi Hinweise
+
+### Dauerbetrieb (Pi 4)
+- 2 Writer + 1 API sind normalerweise unkritisch fuer CPU/RAM.
+- Kritischer ist meist Storage (microSD Verschleiss) und Thermik.
+
+### Temperatur/Throttling pruefen
+Einmalig:
 ```bash
-cargo build --release -p keba-service -p keba-api
-sudo install -m 0755 ./target/release/keba_service /opt/keba_home_api/keba_service
-sudo install -m 0755 ./target/release/keba_api /opt/keba_home_api/keba_api
+vcgencmd measure_temp
+vcgencmd get_throttled
 ```
 
-2. Dienste neu starten:
+Live-Ansicht:
 ```bash
-sudo systemctl restart keba-home-service@carport
-sudo systemctl restart keba-home-service@eingang
-sudo systemctl restart keba-home-api-reader
+watch -n 2 'vcgencmd measure_temp; vcgencmd get_throttled'
 ```
 
-3. Verifikation:
+Richtwerte:
+- dauerhaft < 70C: gut
+- Richtung 80C+: beobachten/gegensteuern
+- `get_throttled=0x0`: kein Throttling/UV-Problem
+
+### Journald begrenzen (wichtig)
+Damit Logs den Speicher nicht vollschreiben:
 ```bash
-sudo systemctl status keba-home-service@carport keba-home-service@eingang keba-home-api-reader
-curl -s http://127.0.0.1:8080/health
+sudo nano /etc/systemd/journald.conf
 ```
 
-## Backup / Restore (SQLite)
-Hinweis: fuer konsistente Backups beide Dienste vorher stoppen.
+Empfohlene Werte:
+```ini
+[Journal]
+SystemMaxUse=500M
+SystemKeepFree=1G
+MaxFileSec=1month
+```
 
-### Backup
+Aktivieren:
+```bash
+sudo systemctl restart systemd-journald
+```
+
+Pruefen/Bereinigen:
+```bash
+journalctl --disk-usage
+sudo journalctl --vacuum-size=500M
+```
+
+### microSD Empfehlung
+- 64/65GB ist fuer Start ok.
+- Fuer langfristig robusten 24/7 Betrieb besser SSD (USB) fuer DB/Logs.
+
+## Backup / Restore
+Backup:
 ```bash
 sudo systemctl stop keba-home-api-reader
 sudo systemctl stop keba-home-service@carport
@@ -128,7 +169,7 @@ sudo systemctl start keba-home-service@eingang
 sudo systemctl start keba-home-api-reader
 ```
 
-### Restore
+Restore:
 ```bash
 sudo systemctl stop keba-home-api-reader
 sudo systemctl stop keba-home-service@carport
@@ -140,25 +181,14 @@ sudo systemctl start keba-home-service@eingang
 sudo systemctl start keba-home-api-reader
 ```
 
-## Haeufige Fehlerbilder
-1. API startet, aber liefert DB-Fehler:
-- Pruefen, ob mindestens eine Writer-Instanz bereits lief und Migrationen geschrieben hat.
-- Writer zuerst starten, danach API.
+## Troubleshooting kurz
+1. API startet, aber DB-Fehler:
+- Mindestens eine Writer-Instanz zuerst starten (Migrationen).
 
-2. Writer kann DB nicht oeffnen (`unable to open database file`):
-- Rechte auf `/var/lib/keba` pruefen.
-- `DB_PATH` in beiden ENV-Dateien pruefen.
+2. `database is locked` taucht auf:
+- Kurzzeitige Contentions sind normal.
+- Bei haeufigen Locks Poll-Intervall erhoehen oder I/O-Last reduzieren.
 
-3. API zeigt keine neuen Sessions:
-- Writer-Logs pruefen: `journalctl -u keba-home-service@carport -f` und `...@eingang -f`
-- KEBA-Erreichbarkeit/IP/Port pruefen.
-
-## Rollback-Hinweis
-Bei Problemen auf vorherige Binaries wechseln und beide Dienste neu starten:
-```bash
-sudo install -m 0755 /opt/keba_home_api/keba_service.previous /opt/keba_home_api/keba_service
-sudo install -m 0755 /opt/keba_home_api/keba_api.previous /opt/keba_home_api/keba_api
-sudo systemctl restart keba-home-service@carport
-sudo systemctl restart keba-home-service@eingang
-sudo systemctl restart keba-home-api-reader
-```
+3. Keine neuen Sessions in API:
+- Writer-Logs der betroffenen Station pruefen.
+- IP/Port/KEBA-Erreichbarkeit pruefen.

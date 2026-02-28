@@ -7,11 +7,33 @@ pub mod services;
 pub use error::AppError;
 
 pub fn run() -> Result<(), AppError> {
+    run_combined()
+}
+
+pub fn run_combined() -> Result<(), AppError> {
     logging::init()?;
-
     let config = config::AppConfig::from_env()?;
+    log_bootstrap("combined", &config);
+    runtime::run_combined(config)
+}
 
+pub fn run_service() -> Result<(), AppError> {
+    logging::init()?;
+    let config = config::AppConfig::from_env()?;
+    log_bootstrap("service", &config);
+    runtime::run_service(config)
+}
+
+pub fn run_api() -> Result<(), AppError> {
+    logging::init()?;
+    let config = config::AppConfig::from_env_for_api()?;
+    log_bootstrap("api", &config);
+    runtime::run_api(config)
+}
+
+fn log_bootstrap(mode: &str, config: &config::AppConfig) {
     tracing::info!(
+        run_mode = mode,
         keba_ip = %config.keba_ip,
         keba_source = ?config.keba_source,
         keba_udp_port = config.keba_udp_port,
@@ -28,6 +50,4 @@ pub fn run() -> Result<(), AppError> {
         status_station_count = config.status_stations.len(),
         "application bootstrap initialized"
     );
-
-    runtime::run(config)
 }

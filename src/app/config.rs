@@ -36,16 +36,36 @@ pub struct StatusStationConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self, AppError> {
         let _ = dotenvy::dotenv();
-        Self::from_lookup(|key| std::env::var(key).ok())
+        Self::from_lookup_with_mode(|key| std::env::var(key).ok(), true)
     }
 
+    pub fn from_env_for_api() -> Result<Self, AppError> {
+        let _ = dotenvy::dotenv();
+        Self::from_lookup_with_mode(|key| std::env::var(key).ok(), false)
+    }
+
+    #[cfg(test)]
     fn from_lookup<F>(lookup: F) -> Result<Self, AppError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Self::from_lookup_with_mode(lookup, true)
+    }
+
+    fn from_lookup_with_mode<F>(lookup: F, require_keba_runtime: bool) -> Result<Self, AppError>
     where
         F: Fn(&str) -> Option<String>,
     {
         let keba_ip = lookup("KEBA_IP")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
+            .or_else(|| {
+                if require_keba_runtime {
+                    None
+                } else {
+                    Some("127.0.0.1".to_string())
+                }
+            })
             .ok_or_else(|| AppError::config("KEBA_IP is required"))?;
 
         let config = Self {
@@ -86,7 +106,10 @@ impl AppConfig {
             status_stations: parse_status_stations(&lookup)?,
         };
 
-        if config.keba_source == KebaSource::DebugFile && config.keba_debug_data_file.is_none() {
+        if require_keba_runtime
+            && config.keba_source == KebaSource::DebugFile
+            && config.keba_debug_data_file.is_none()
+        {
             return Err(AppError::config(
                 "KEBA_DEBUG_DATA_FILE is required when KEBA_SOURCE=debug_file",
             ));
@@ -336,5 +359,25 @@ mod tests {
             result.unwrap_err().to_string(),
             "invalid configuration: STATUS_STATIONS entry must look like Name@IP:Port: invalid-format"
         );
+    }
+
+    #[test]
+    fn api_mode_allows_missing_keba_ip() {
+        let result = AppConfig::from_lookup_with_mode(|_| None, false)
+            .expect("api mode config should be valid without keba ip");
+        assert_eq!(result.keba_ip, "127.0.0.1");
+    }
+
+    #[test]
+    fn api_mode_does_not_require_debug_file_fixture() {
+        let result = AppConfig::from_lookup_with_mode(
+            |key| match key {
+                "KEBA_SOURCE" => Some("debug_file".to_string()),
+                _ => None,
+            },
+            false,
+        )
+        .expect("api mode should not require debug file");
+        assert_eq!(result.keba_source, KebaSource::DebugFile);
     }
 }

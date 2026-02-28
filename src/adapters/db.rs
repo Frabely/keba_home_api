@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use thiserror::Error;
 
 pub use crate::domain::models::{
@@ -230,7 +230,46 @@ pub enum DbError {
 }
 
 pub fn open_connection(path: &str) -> Result<Connection, DbError> {
-    Connection::open(path).map_err(DbError::from)
+    let connection = Connection::open(path).map_err(DbError::from)?;
+    configure_writer_connection_pragmas(&connection)?;
+    Ok(connection)
+}
+
+pub fn open_read_only_connection(path: &str) -> Result<Connection, DbError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(DbError::from)?;
+    configure_reader_connection_pragmas(&connection)?;
+    Ok(connection)
+}
+
+fn configure_writer_connection_pragmas(connection: &Connection) -> Result<(), DbError> {
+    connection
+        .execute_batch(
+            r#"
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+"#,
+        )
+        .map_err(DbError::from)?;
+    Ok(())
+}
+
+fn configure_reader_connection_pragmas(connection: &Connection) -> Result<(), DbError> {
+    connection
+        .execute_batch(
+            r#"
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA query_only = ON;
+"#,
+        )
+        .map_err(DbError::from)?;
+    Ok(())
 }
 
 pub fn run_migrations(connection: &mut Connection) -> Result<(), DbError> {

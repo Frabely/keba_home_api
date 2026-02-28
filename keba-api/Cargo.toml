@@ -1,0 +1,11 @@
+[package]
+name = "keba-api"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "keba_api"
+path = "src/main.rs"
+
+[dependencies]
+keba_home_api = { path = ".." }

@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "keba-service", "keba-api"]
+default-members = [".", "keba-service", "keba-api"]
+resolver = "2"
+
 [package]
 name = "keba_home_api"
 version = "0.1.0"
