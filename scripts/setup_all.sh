@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CREATE_KEBA_USER=1
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -18,6 +19,47 @@ is_dir_writable() {
   probe_file="$(mktemp "${dir}/.keba-write-test.XXXXXX" 2>/dev/null)" || return 1
   rm -f "${probe_file}" >/dev/null 2>&1 || return 1
   return 0
+}
+
+print_usage() {
+  cat <<'EOF'
+Usage: bash ./scripts/setup_all.sh [--no-create-user]
+
+Options:
+  --no-create-user  Do not create the 'keba' system user automatically.
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-create-user)
+      CREATE_KEBA_USER=0
+      ;;
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $arg" >&2
+      print_usage
+      exit 1
+      ;;
+  esac
+done
+
+ensure_keba_user() {
+  if id -u keba >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ "${CREATE_KEBA_USER}" -eq 1 ]]; then
+    require_cmd useradd
+    echo "creating missing system user 'keba'..."
+    sudo useradd --system --home /var/lib/keba --create-home --shell /usr/sbin/nologin keba
+    return
+  fi
+
+  echo "warning: user 'keba' does not exist; continuing without ownership changes (--no-create-user)" >&2
 }
 
 ensure_cargo() {
@@ -91,10 +133,11 @@ cargo build --release -p keba-service -p keba-api
 echo "[2/6] creating runtime directories..."
 sudo mkdir -p /opt/keba_home_api /opt/keba_home_api/scripts /etc/keba /var/lib/keba /var/backups/keba
 
+ensure_keba_user
 if id -u keba >/dev/null 2>&1; then
   sudo chown -R keba:keba /opt/keba_home_api /var/lib/keba /var/backups/keba
 else
-  echo "warning: user 'keba' does not exist yet; ownership changes skipped" >&2
+  echo "warning: ownership changes skipped because user 'keba' does not exist" >&2
 fi
 
 echo "[3/6] installing binaries and scripts..."

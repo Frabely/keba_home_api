@@ -11,7 +11,7 @@ for env_file in "${required_envs[@]}"; do
     echo "missing required env file: ${env_file}" >&2
     exit 1
   fi
-  if grep -Eq '^KEBA_IP=REPLACE_WITH_' "${env_file}"; then
+  if sudo grep -Eq '^KEBA_IP=REPLACE_WITH_' "${env_file}"; then
     echo "please set KEBA_IP in ${env_file} before start" >&2
     exit 1
   fi
