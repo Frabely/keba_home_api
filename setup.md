@@ -19,10 +19,21 @@ Alle drei nutzen dieselbe SQLite-DB (`DB_PATH` identisch).
 bash ./scripts/setup_all.sh
 ```
 Hinweis: Wenn `cargo` fehlt, installiert `setup_all.sh` die Rust-Toolchain automatisch via `rustup` (benoetigt `curl` + Internetzugang).
+Wenn `$HOME/.cargo` oder `$HOME/.rustup` nicht schreibbar ist, nutzt das Skript automatisch `/tmp` als Fallback.
 
 2. Nach Setzen der beiden `KEBA_IP` Werte alle Prozesse starten:
 ```bash
 bash ./scripts/start_all_services.sh
+```
+
+3. Vollstaendig aufraeumen (inkl. Build-Artefakte):
+```bash
+bash ./scripts/cleanup_all.sh
+```
+Hinweis: Entfernt Deploy-Artefakte, systemd-Units, ENV-Dateien und standardmaessig auch `/var/lib/keba` sowie `/var/backups/keba`.
+Wenn Daten erhalten bleiben sollen:
+```bash
+bash ./scripts/cleanup_all.sh --keep-data
 ```
 
 ## Projektstruktur (relevant)
@@ -45,6 +56,15 @@ Artefakte:
 ## Linux/Raspberry Installation
 Hinweis: Dieser Abschnitt ist der manuelle Fallback.
 Bevorzugt `Quickstart (2 Befehle)` verwenden.
+
+## Troubleshooting (Rust/Cargo Installation)
+Bei Fehlern wie `Input/output error (os error 5)` liegt meist ein Speicher-/Dateisystemproblem vor.
+Schnellcheck:
+```bash
+df -h
+dmesg | tail -n 50
+```
+Falls das Dateisystem fehlerhaft ist: fsck beim naechsten Boot einplanen.
 
 1. Verzeichnisse anlegen:
 ```bash

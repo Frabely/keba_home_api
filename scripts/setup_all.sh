@@ -11,6 +11,15 @@ require_cmd() {
   fi
 }
 
+is_dir_writable() {
+  local dir="$1"
+  mkdir -p "${dir}" >/dev/null 2>&1 || return 1
+  local probe_file
+  probe_file="$(mktemp "${dir}/.keba-write-test.XXXXXX" 2>/dev/null)" || return 1
+  rm -f "${probe_file}" >/dev/null 2>&1 || return 1
+  return 0
+}
+
 ensure_cargo() {
   if command -v cargo >/dev/null 2>&1; then
     return
@@ -23,12 +32,38 @@ ensure_cargo() {
 
   echo "cargo not found, installing Rust toolchain via rustup..."
   require_cmd curl
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 
-  # shellcheck disable=SC1090
-  source "${HOME}/.cargo/env"
+  local rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+  local cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+
+  if ! is_dir_writable "${rustup_home}" || ! is_dir_writable "${cargo_home}"; then
+    echo "warning: ${rustup_home} or ${cargo_home} is not writable; falling back to /tmp" >&2
+    rustup_home="/tmp/keba-rustup-${USER:-user}"
+    cargo_home="/tmp/keba-cargo-${USER:-user}"
+    if ! is_dir_writable "${rustup_home}" || ! is_dir_writable "${cargo_home}"; then
+      echo "cargo installation failed: neither HOME nor /tmp is writable." >&2
+      echo "Check disk/filesystem health (df -h, dmesg, fsck)." >&2
+      exit 1
+    fi
+  fi
+
+  RUSTUP_HOME="${rustup_home}" CARGO_HOME="${cargo_home}" \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    RUSTUP_HOME="${rustup_home}" CARGO_HOME="${cargo_home}" \
+    sh -s -- -y --profile minimal
+
+  export RUSTUP_HOME="${rustup_home}"
+  export CARGO_HOME="${cargo_home}"
+  export PATH="${CARGO_HOME}/bin:${PATH}"
+
+  if [[ -f "${CARGO_HOME}/env" ]]; then
+    # shellcheck disable=SC1090
+    source "${CARGO_HOME}/env"
+  fi
+
   if ! command -v cargo >/dev/null 2>&1; then
     echo "cargo installation failed (cargo still not found in PATH)" >&2
+    echo "If you still see I/O errors, verify storage with: df -h, dmesg | tail -n 50, sudo fsck." >&2
     exit 1
   fi
 }
