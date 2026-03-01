@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {
     pub id: String,
-    pub started_at: String,
+    pub started_at: Option<String>,
     pub finished_at: String,
     pub duration_ms: i64,
     pub energy_kwh: f64,
@@ -22,7 +22,7 @@ pub struct SessionRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewSessionRecord {
-    pub started_at: String,
+    pub started_at: Option<String>,
     pub finished_at: String,
     pub duration_ms: i64,
     pub energy_kwh: f64,

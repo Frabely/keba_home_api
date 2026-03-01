@@ -13,7 +13,7 @@ pub struct ApiState {
 #[serde(rename_all = "camelCase")]
 pub struct SessionResponse {
     pub id: String,
-    pub started_at: String,
+    pub started_at: Option<String>,
     pub finished_at: String,
     pub duration_ms: i64,
     pub kwh: f64,
@@ -37,7 +37,7 @@ pub struct DiagnosticsSessionSummary {
     pub status: String,
     pub started_reason: String,
     pub finished_reason: String,
-    pub started_at: String,
+    pub started_at: Option<String>,
     pub finished_at: String,
     pub duration_ms: i64,
     pub kwh: f64,
@@ -251,22 +251,24 @@ mod tests {
     }
 
     fn sample_new_session(
-        started_at: &str,
+        started_at: Option<&str>,
         finished_at: &str,
         created_at: &str,
         energy_kwh: f64,
     ) -> NewSessionRecord {
-        let started_ms = chrono::DateTime::parse_from_rfc3339(started_at)
-            .expect("started_at should parse")
-            .timestamp_millis();
+        let started_ms = started_at.map(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .expect("started_at should parse")
+                .timestamp_millis()
+        });
         let finished_ms = chrono::DateTime::parse_from_rfc3339(finished_at)
             .expect("finished_at should parse")
             .timestamp_millis();
 
         NewSessionRecord {
-            started_at: started_at.to_string(),
+            started_at: started_at.map(ToString::to_string),
             finished_at: finished_at.to_string(),
-            duration_ms: (finished_ms - started_ms).max(0),
+            duration_ms: started_ms.map_or(0, |value| (finished_ms - value).max(0)),
             energy_kwh,
             source: "debug_file".to_string(),
             status: "completed".to_string(),
@@ -327,7 +329,7 @@ mod tests {
             insert_session(
                 &db,
                 &sample_new_session(
-                    "2026-02-20T10:00:00.000Z",
+                    Some("2026-02-20T10:00:00.000Z"),
                     "2026-02-20T11:00:00.000Z",
                     "2026-02-20T11:00:00.000Z",
                     5.0,
@@ -337,7 +339,7 @@ mod tests {
             insert_session(
                 &db,
                 &sample_new_session(
-                    "2026-02-21T10:00:00.000Z",
+                    Some("2026-02-21T10:00:00.000Z"),
                     "2026-02-21T11:00:00.000Z",
                     "2026-02-21T11:00:00.000Z",
                     6.0,
@@ -369,6 +371,45 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn latest_session_returns_null_started_at_when_unknown() {
+        let (state, connection) = build_state_with_migrated_db("latest-null-started-at-api.sqlite");
+
+        {
+            let db = connection.lock().expect("lock should be available");
+            insert_session(
+                &db,
+                &sample_new_session(
+                    None,
+                    "2026-02-21T11:00:00.000Z",
+                    "2026-02-21T11:00:00.000Z",
+                    6.0,
+                ),
+            )
+            .expect("insert should succeed");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["startedAt"], serde_json::Value::Null);
+    }
+
+    #[actix_web::test]
     async fn list_sessions_supports_limit_and_offset() {
         let (state, connection) = build_state_with_migrated_db("list-api.sqlite");
 
@@ -380,7 +421,7 @@ mod tests {
                 insert_session(
                     &db,
                     &sample_new_session(
-                        &format!("2026-02-{day:02}T10:00:00.000Z"),
+                        Some(&format!("2026-02-{day:02}T10:00:00.000Z")),
                         &created_at,
                         &created_at,
                         5.0 + idx as f64,
@@ -441,7 +482,7 @@ mod tests {
             insert_session(
                 &db,
                 &sample_new_session(
-                    "2026-02-20T10:00:00.000Z",
+                    Some("2026-02-20T10:00:00.000Z"),
                     "2026-02-20T10:10:00.000Z",
                     "3026-02-20T10:10:00.000Z",
                     4.5,
@@ -479,7 +520,7 @@ mod tests {
             insert_session(
                 &db,
                 &sample_new_session(
-                    "2026-02-22T10:00:00.000Z",
+                    Some("2026-02-22T10:00:00.000Z"),
                     "2026-02-22T11:00:00.000Z",
                     "2026-02-22T11:00:00.000Z",
                     7.0,
@@ -515,7 +556,7 @@ mod tests {
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["schemaVersion"], 4);
+        assert_eq!(json["schemaVersion"], 5);
         assert_eq!(json["sessionsCount"], 1);
         assert_eq!(json["logEventsCount"], 1);
         assert_eq!(json["latestSession"]["status"], "completed");

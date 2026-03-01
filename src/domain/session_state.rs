@@ -151,6 +151,10 @@ impl SessionStateMachine {
         self.active_session_started_at
     }
 
+    pub fn stable_plugged(&self) -> Option<bool> {
+        self.stable_plugged
+    }
+
     fn accept_candidate_at(&mut self, plugged_observation: bool, observed_at: TimestampMs) -> bool {
         match self.candidate {
             Some(mut candidate) if candidate.plugged == plugged_observation => {

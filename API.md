@@ -3,6 +3,7 @@
 Base URL (default): `http://localhost:8080`
 
 All timestamps are UTC ISO-8601 (`...Z`), JSON fields are `camelCase`.
+`startedAt` is nullable when the service starts while a cable is already plugged in and the true session start is unknown.
 
 ## Runtime Split
 
@@ -115,15 +116,15 @@ Response (`200`):
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "sessionsCount": 12,
   "logEventsCount": 37,
   "latestSession": {
     "id": "0b06eb56-e000-4f66-83e2-b6324afe6f12",
     "status": "completed",
-    "startedReason": "plug_state_transition",
+    "startedReason": "service_started_while_plugged",
     "finishedReason": "plug_state_transition",
-    "startedAt": "2026-02-27T14:42:00.000Z",
+    "startedAt": null,
     "finishedAt": "2026-02-27T14:46:00.000Z",
     "durationMs": 240000,
     "kwh": 4.0,

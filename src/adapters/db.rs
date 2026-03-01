@@ -6,7 +6,7 @@ pub use crate::domain::models::{
 };
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (
@@ -217,6 +217,51 @@ ON log_events (code, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_charging_session_log_events_log_event
 ON charging_session_log_events (log_event_id);
+"#,
+    ),
+    (
+        5,
+        r#"
+CREATE TABLE IF NOT EXISTS charging_sessions_v3 (
+    id TEXT PRIMARY KEY,
+    started_at TEXT,
+    finished_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    energy_kwh REAL NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_reason TEXT NOT NULL,
+    finished_reason TEXT NOT NULL,
+    poll_interval_ms INTEGER NOT NULL,
+    debounce_samples INTEGER NOT NULL,
+    error_count_during_session INTEGER NOT NULL,
+    station_id TEXT,
+    created_at TEXT NOT NULL,
+    raw_report2_start TEXT,
+    raw_report3_start TEXT,
+    raw_report2_end TEXT,
+    raw_report3_end TEXT
+);
+
+INSERT INTO charging_sessions_v3 (
+    id, started_at, finished_at, duration_ms, energy_kwh, source, status, started_reason, finished_reason,
+    poll_interval_ms, debounce_samples, error_count_during_session, station_id, created_at,
+    raw_report2_start, raw_report3_start, raw_report2_end, raw_report3_end
+)
+SELECT
+    id, started_at, finished_at, duration_ms, energy_kwh, source, status, started_reason, finished_reason,
+    poll_interval_ms, debounce_samples, error_count_during_session, station_id, created_at,
+    raw_report2_start, raw_report3_start, raw_report2_end, raw_report3_end
+FROM charging_sessions;
+
+DROP TABLE charging_sessions;
+ALTER TABLE charging_sessions_v3 RENAME TO charging_sessions;
+
+CREATE INDEX IF NOT EXISTS idx_charging_sessions_created_at_desc
+ON charging_sessions (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_charging_sessions_station_created_at_desc
+ON charging_sessions (station_id, created_at DESC);
 "#,
     ),
 ];
@@ -576,22 +621,24 @@ mod tests {
     }
 
     fn sample_new_session(
-        started_at: &str,
+        started_at: Option<&str>,
         finished_at: &str,
         created_at: &str,
         energy_kwh: f64,
     ) -> NewSessionRecord {
-        let started_ms = chrono::DateTime::parse_from_rfc3339(started_at)
-            .expect("started_at should parse")
-            .timestamp_millis();
+        let started_ms = started_at.map(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .expect("started_at should parse")
+                .timestamp_millis()
+        });
         let finished_ms = chrono::DateTime::parse_from_rfc3339(finished_at)
             .expect("finished_at should parse")
             .timestamp_millis();
 
         NewSessionRecord {
-            started_at: started_at.to_string(),
+            started_at: started_at.map(ToString::to_string),
             finished_at: finished_at.to_string(),
-            duration_ms: (finished_ms - started_ms).max(0),
+            duration_ms: started_ms.map_or(0, |value| (finished_ms - value).max(0)),
             energy_kwh,
             source: "debug_file".to_string(),
             status: "completed".to_string(),
@@ -655,6 +702,15 @@ mod tests {
             )
             .expect("sessions table check should work");
         assert_eq!(old_table_exists, 0);
+
+        let started_at_notnull: i64 = connection
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('charging_sessions') WHERE name = 'started_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("started_at column metadata query should succeed");
+        assert_eq!(started_at_notnull, 0);
 
         let index_exists: i64 = connection
             .query_row(
@@ -745,7 +801,7 @@ mod tests {
         let inserted_id = insert_session(
             &connection,
             &sample_new_session(
-                "2026-02-20T18:12:03.120Z",
+                Some("2026-02-20T18:12:03.120Z"),
                 "2026-02-20T22:45:10.002Z",
                 "2026-02-20T22:45:10.002Z",
                 10.83,
@@ -765,6 +821,31 @@ mod tests {
     }
 
     #[test]
+    fn inserts_and_reads_latest_session_with_null_started_at() {
+        let db_path = temp_db_path("latest-null-started-at.sqlite");
+        let mut connection =
+            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
+        run_migrations(&mut connection).expect("migrations should succeed");
+
+        insert_session(
+            &connection,
+            &sample_new_session(
+                None,
+                "2026-02-20T22:45:10.002Z",
+                "2026-02-20T22:45:10.002Z",
+                10.83,
+            ),
+        )
+        .expect("insert should succeed");
+
+        let latest = get_latest_session(&connection)
+            .expect("query should succeed")
+            .expect("session should exist");
+
+        assert_eq!(latest.started_at, None);
+    }
+
+    #[test]
     fn lists_sessions_with_limit_and_offset() {
         let db_path = temp_db_path("list.sqlite");
         let mut connection =
@@ -773,19 +854,19 @@ mod tests {
 
         let sessions = [
             sample_new_session(
-                "2026-02-20T10:00:00.000Z",
+                Some("2026-02-20T10:00:00.000Z"),
                 "2026-02-20T11:00:00.000Z",
                 "2026-02-20T11:00:00.000Z",
                 5.0,
             ),
             sample_new_session(
-                "2026-02-21T10:00:00.000Z",
+                Some("2026-02-21T10:00:00.000Z"),
                 "2026-02-21T11:00:00.000Z",
                 "2026-02-21T11:00:00.000Z",
                 6.0,
             ),
             sample_new_session(
-                "2026-02-22T10:00:00.000Z",
+                Some("2026-02-22T10:00:00.000Z"),
                 "2026-02-22T11:00:00.000Z",
                 "2026-02-22T11:00:00.000Z",
                 7.0,
@@ -813,7 +894,7 @@ mod tests {
         insert_session(
             &connection,
             &sample_new_session(
-                "2026-02-20T10:00:00.000Z",
+                Some("2026-02-20T10:00:00.000Z"),
                 "2026-02-20T11:00:00.000Z",
                 "2026-02-20T11:00:00.000Z",
                 5.0,
@@ -823,7 +904,7 @@ mod tests {
         insert_session(
             &connection,
             &sample_new_session(
-                "2026-02-20T11:30:00.000Z",
+                Some("2026-02-20T11:30:00.000Z"),
                 "2026-02-20T11:35:00.000Z",
                 "2026-02-20T11:35:00.000Z",
                 2.0,
@@ -851,7 +932,7 @@ mod tests {
         let session_id = insert_session(
             &connection,
             &sample_new_session(
-                "2026-02-20T10:00:00.000Z",
+                Some("2026-02-20T10:00:00.000Z"),
                 "2026-02-20T11:00:00.000Z",
                 "2026-02-20T11:00:00.000Z",
                 5.0,

@@ -1,0 +1,13 @@
+{
+  "loop_forever": true,
+  "report2": [
+    { "ok": { "Plug": 7, "Seconds": 100 } },
+    { "ok": { "Plug": 7, "Seconds": 101 } },
+    { "ok": { "Plug": 0, "Seconds": 102 } },
+    { "ok": { "Plug": 0, "Seconds": 103 } }
+  ],
+  "report3": [
+    { "ok": { "Total energy": 100000 } },
+    { "ok": { "Total energy": 105000 } }
+  ]
+}

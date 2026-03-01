@@ -289,3 +289,7 @@ sudo systemctl start keba-home-api-reader
 3. Keine neuen Sessions in API:
 - Writer-Logs der betroffenen Station pruefen.
 - IP/Port/KEBA-Erreichbarkeit pruefen.
+
+4. Session mit `startedAt: null`:
+- Erwartetes Verhalten, wenn der Service waehrend einer bereits laufenden/angesteckten Session gestartet wurde.
+- In diesem Fall ist der exakte Session-Startzeitpunkt unbekannt; `finishedAt` und `kwh` werden weiterhin normal persistiert.

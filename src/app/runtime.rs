@@ -65,6 +65,7 @@ pub struct SessionPoller<Cl> {
     debounce_samples: i64,
     station_id: Option<String>,
     error_count_during_session: i64,
+    active_session_bootstrapped: bool,
     pending_session_log_event_ids: Vec<String>,
     results_output_file: Option<String>,
 }
@@ -85,7 +86,7 @@ struct StationStatusSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionResultEntry {
-    from: String,
+    from: Option<String>,
     to: String,
     #[serde(rename = "durationMs")]
     duration_ms: i64,
@@ -130,6 +131,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
             debounce_samples: i64::try_from(debounce_samples).unwrap_or(i64::MAX),
             station_id: config.station_id,
             error_count_during_session: 0,
+            active_session_bootstrapped: false,
             pending_session_log_event_ids: Vec::new(),
             results_output_file: config.results_output_file,
         }
@@ -175,6 +177,9 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 unplugged_at,
             }) => self.handle_unplugged(plugged_at, unplugged_at, report2_raw)?,
             None => {
+                if report2.plugged && self.machine.stable_plugged() == Some(true) {
+                    self.bootstrap_active_session_if_needed(&report2_raw);
+                }
                 tracing::debug!(
                     plugged = report2.plugged,
                     seconds = report2.seconds,
@@ -188,7 +193,8 @@ impl<Cl: Clock> SessionPoller<Cl> {
     }
 
     pub fn note_poll_error(&mut self, error: &PollerError) {
-        let is_active_session = self.machine.active_session_started_at().is_some();
+        let is_active_session =
+            self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped;
         if is_active_session {
             self.error_count_during_session += 1;
         }
@@ -272,6 +278,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
         self.start_report2_raw = Some(report2_raw.to_string());
         self.start_report3_raw = Some(report3_raw.to_string());
         self.error_count_during_session = 0;
+        self.active_session_bootstrapped = false;
         self.pending_session_log_event_ids.clear();
         self.start_snapshot = Some(EnergySnapshot {
             present_session_kwh: report3.present_session_kwh,
@@ -304,7 +311,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
                     })),
                 );
                 let new_session = self.build_session_record(
-                    plugged_at,
+                    self.session_started_at(plugged_at),
                     unplugged_at,
                     SessionCompletion {
                         energy_kwh: 0.0,
@@ -332,7 +339,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
                     })),
                 );
                 let new_session = self.build_session_record(
-                    plugged_at,
+                    self.session_started_at(plugged_at),
                     unplugged_at,
                     SessionCompletion {
                         energy_kwh: 0.0,
@@ -394,7 +401,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
             "computed session completion values"
         );
         let new_session = self.build_session_record(
-            plugged_at,
+            self.session_started_at(plugged_at),
             unplugged_at,
             SessionCompletion {
                 energy_kwh,
@@ -409,7 +416,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
 
         tracing::info!(
             session_id,
-            started_at = %new_session.started_at,
+            started_at = ?new_session.started_at,
             finished_at = %new_session.finished_at,
             kwh = new_session.energy_kwh,
             "charging session persisted"
@@ -426,18 +433,24 @@ impl<Cl: Clock> SessionPoller<Cl> {
 
     fn build_session_record(
         &self,
-        plugged_at: TimestampMs,
+        started_at: Option<TimestampMs>,
         unplugged_at: TimestampMs,
         completion: SessionCompletion,
     ) -> NewSessionRecord {
+        let started_at_iso = started_at.map(timestamp_to_iso8601);
+        let started_reason = if started_at_iso.is_some() {
+            "plug_state_transition".to_string()
+        } else {
+            "service_started_while_plugged".to_string()
+        };
         NewSessionRecord {
-            started_at: timestamp_to_iso8601(plugged_at),
+            started_at: started_at_iso,
             finished_at: timestamp_to_iso8601(unplugged_at),
-            duration_ms: (unplugged_at.0 - plugged_at.0).max(0),
+            duration_ms: started_at.map_or(0, |value| (unplugged_at.0 - value.0).max(0)),
             energy_kwh: completion.energy_kwh,
             source: self.source.clone(),
             status: completion.status.to_string(),
-            started_reason: "plug_state_transition".to_string(),
+            started_reason,
             finished_reason: completion.finished_reason.to_string(),
             poll_interval_ms: self.poll_interval_ms,
             debounce_samples: self.debounce_samples,
@@ -448,6 +461,67 @@ impl<Cl: Clock> SessionPoller<Cl> {
             raw_report3_start: self.start_report3_raw.clone(),
             raw_report2_end: Some(completion.report2_end_raw),
             raw_report3_end: completion.report3_end_raw,
+        }
+    }
+
+    fn bootstrap_active_session_if_needed(&mut self, report2_raw: &Value) {
+        if self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped {
+            return;
+        }
+
+        let report3_raw = match self.client.get_report3() {
+            Ok(value) => value,
+            Err(error) => {
+                self.persist_log_event(
+                    "warn",
+                    "poll.fetch_report3_on_bootstrap_plugged",
+                    &error.to_string(),
+                    false,
+                    None,
+                );
+                tracing::warn!(
+                    error = %error,
+                    "failed to fetch report 3 while bootstrapping active session"
+                );
+                return;
+            }
+        };
+        let report3 = match parse_report3(&report3_raw) {
+            Ok(report3) => report3,
+            Err(error) => {
+                self.persist_log_event(
+                    "warn",
+                    "poll.parse_report3_on_bootstrap_plugged",
+                    &error.to_string(),
+                    false,
+                    None,
+                );
+                tracing::warn!(
+                    error = %error,
+                    "failed to parse report 3 while bootstrapping active session"
+                );
+                return;
+            }
+        };
+
+        self.start_report2_raw = Some(report2_raw.to_string());
+        self.start_report3_raw = Some(report3_raw.to_string());
+        self.error_count_during_session = 0;
+        self.pending_session_log_event_ids.clear();
+        self.start_snapshot = Some(EnergySnapshot {
+            present_session_kwh: report3.present_session_kwh,
+            total_kwh: report3.total_kwh,
+        });
+        self.active_session_bootstrapped = true;
+
+        tracing::info!("bootstrapped active session with unknown start time");
+    }
+
+    fn session_started_at(&self, plugged_at: TimestampMs) -> Option<TimestampMs> {
+        if self.active_session_bootstrapped {
+            None
+        } else {
+            Some(plugged_at)
         }
     }
 
@@ -509,6 +583,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
         self.start_report2_raw = None;
         self.start_report3_raw = None;
         self.error_count_during_session = 0;
+        self.active_session_bootstrapped = false;
         self.pending_session_log_event_ids.clear();
 
         Ok(session_id)
@@ -1117,7 +1192,10 @@ mod tests {
                 .expect("db query should succeed")
                 .expect("session should exist");
             assert_eq!(latest.energy_kwh, 5.0);
-            assert_eq!(latest.started_at, "2023-11-14T22:13:20.000Z");
+            assert_eq!(
+                latest.started_at.as_deref(),
+                Some("2023-11-14T22:13:20.000Z")
+            );
             assert_eq!(latest.finished_at, "2023-11-14T22:14:20.000Z");
         }
 
@@ -1317,6 +1395,48 @@ mod tests {
     }
 
     #[test]
+    fn bootstrapped_plugged_session_persists_energy_with_null_started_at() {
+        let connection = open_test_connection("poller-bootstrapped-plugged.sqlite");
+        let shared_connection = Arc::new(Mutex::new(connection));
+
+        let fixture = format!(
+            "{}/testdata/debug/startup_plugged_total_diff.json",
+            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
+        );
+        let client = Box::new(
+            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
+        );
+        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
+        let mut poller = SessionPoller::new(
+            client,
+            clock,
+            SqliteSessionService::new(Arc::clone(&shared_connection)),
+            2,
+            SessionPollerConfig {
+                source: "debug_file".to_string(),
+                poll_interval_ms: 1000,
+                station_id: None,
+                results_output_file: None,
+            },
+        );
+
+        for _ in 0..4 {
+            let _ = poller.tick();
+        }
+
+        let locked = shared_connection
+            .lock()
+            .expect("database lock should be available");
+        let latest = get_latest_session(&locked)
+            .expect("db query should succeed")
+            .expect("session should exist");
+        assert_eq!(latest.energy_kwh, 5.0);
+        assert_eq!(latest.started_at, None);
+        assert_eq!(latest.started_reason, "service_started_while_plugged");
+        assert_eq!(latest.finished_reason, "plug_state_transition");
+    }
+
+    #[test]
     fn debounce_flap_at_start_does_not_create_session() {
         let connection = open_test_connection("poller-flap-start.sqlite");
         let shared_connection = Arc::new(Mutex::new(connection));
@@ -1388,7 +1508,10 @@ mod tests {
             .expect("database lock should be available");
         let sessions = list_sessions(&locked, 10, 0).expect("db query should succeed");
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].started_at, "2026-02-27T14:42:00.000Z");
+        assert_eq!(
+            sessions[0].started_at.as_deref(),
+            Some("2026-02-27T14:42:00.000Z")
+        );
         assert_eq!(sessions[0].finished_at, "2026-02-27T14:46:00.000Z");
         assert_eq!(sessions[0].energy_kwh, 4.0);
     }
