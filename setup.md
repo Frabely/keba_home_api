@@ -139,6 +139,15 @@ Log-Verhalten (Default `RUST_LOG=info`):
 - `INFO`: Startup + Zustandsaenderungen + Session-Lifecycle + Heartbeat (standardmaessig 1x/Minute via `STATUS_LOG_INTERVAL_SECONDS=60`)
 - `WARN/ERROR`: sofort bei Problemen
 - `DEBUG`: detaillierte Poll-/Request-Details nur bei aktivem Debug-Level
+- `LOG_FORMAT` steuert die Ausgabeform:
+  - `compact` (Default, empfohlen fuer Konsole/Journal)
+  - `pretty` (mehrzeilig, human-readable)
+  - `full` (inkl. target/module fuer tiefes Debugging)
+
+Kompakte Loganzeige in `journalctl`:
+```bash
+sudo journalctl -u keba-home-service@carport -f -o cat
+```
 
 Debug temporär aktivieren (beide Writer + API), dann zurueck auf `info`:
 ```bash
