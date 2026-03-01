@@ -66,6 +66,17 @@ ensure_cargo() {
     echo "If you still see I/O errors, verify storage with: df -h, dmesg | tail -n 50, sudo fsck." >&2
     exit 1
   fi
+
+  # cargo may exist as rustup shim without a configured default toolchain.
+  if ! cargo -V >/dev/null 2>&1; then
+    require_cmd rustup
+    echo "cargo is present but no default Rust toolchain is configured; setting stable..."
+    rustup default stable
+    if ! cargo -V >/dev/null 2>&1; then
+      echo "cargo is still not usable after 'rustup default stable'." >&2
+      exit 1
+    fi
+  fi
 }
 
 ensure_cargo

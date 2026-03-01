@@ -20,6 +20,7 @@ bash ./scripts/setup_all.sh
 ```
 Hinweis: Wenn `cargo` fehlt, installiert `setup_all.sh` die Rust-Toolchain automatisch via `rustup` (benoetigt `curl` + Internetzugang).
 Wenn `$HOME/.cargo` oder `$HOME/.rustup` nicht schreibbar ist, nutzt das Skript automatisch `/tmp` als Fallback.
+Falls `cargo` als rustup-shim ohne Default-Toolchain vorhanden ist, setzt das Skript automatisch `rustup default stable`.
 
 2. Nach Setzen der beiden `KEBA_IP` Werte alle Prozesse starten:
 ```bash
