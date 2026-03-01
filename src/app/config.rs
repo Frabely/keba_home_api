@@ -68,9 +68,16 @@ impl AppConfig {
             })
             .ok_or_else(|| AppError::config("KEBA_IP is required"))?;
 
+        let keba_udp_port = parse_or_default(&lookup, "KEBA_UDP_PORT", 7090_u16)?;
+        let station_id = lookup("STATION_ID")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let status_stations =
+            parse_status_stations(&lookup, &keba_ip, keba_udp_port, station_id.as_deref())?;
+
         let config = Self {
             keba_ip,
-            keba_udp_port: parse_or_default(&lookup, "KEBA_UDP_PORT", 7090_u16)?,
+            keba_udp_port,
             keba_source: parse_keba_source(&lookup)?,
             keba_modbus_port: parse_or_default(&lookup, "KEBA_MODBUS_PORT", 502_u16)?,
             keba_modbus_unit_id: parse_or_default(&lookup, "KEBA_MODBUS_UNIT_ID", 255_u8)?,
@@ -95,15 +102,13 @@ impl AppConfig {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 2_usize)?,
-            station_id: lookup("STATION_ID")
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
+            station_id: station_id.clone(),
             status_log_interval_seconds: parse_or_default(
                 &lookup,
                 "STATUS_LOG_INTERVAL_SECONDS",
                 60_u64,
             )?,
-            status_stations: parse_status_stations(&lookup)?,
+            status_stations,
         };
 
         if require_keba_runtime
@@ -162,12 +167,21 @@ where
     }
 }
 
-fn parse_status_stations<F>(lookup: &F) -> Result<Vec<StatusStationConfig>, AppError>
+fn parse_status_stations<F>(
+    lookup: &F,
+    keba_ip: &str,
+    keba_udp_port: u16,
+    station_id: Option<&str>,
+) -> Result<Vec<StatusStationConfig>, AppError>
 where
     F: Fn(&str) -> Option<String>,
 {
     let raw = lookup("STATUS_STATIONS").unwrap_or_else(|| {
-        "KEBA Carport@192.168.233.98:7090;KEBA Eingang@192.168.233.91:7090".to_string()
+        let station_name = station_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| format!("KEBA {}", id.trim()))
+            .unwrap_or_else(|| "KEBA".to_string());
+        format!("{station_name}@{keba_ip}:{keba_udp_port}")
     });
 
     let mut stations = Vec::new();
@@ -264,18 +278,31 @@ mod tests {
         assert_eq!(result.status_log_interval_seconds, 60);
         assert_eq!(
             result.status_stations,
-            vec![
-                StatusStationConfig {
-                    name: "KEBA Carport".to_string(),
-                    ip: "192.168.233.98".to_string(),
-                    port: 7090,
-                },
-                StatusStationConfig {
-                    name: "KEBA Eingang".to_string(),
-                    ip: "192.168.233.91".to_string(),
-                    port: 7090,
-                },
-            ]
+            vec![StatusStationConfig {
+                name: "KEBA".to_string(),
+                ip: "192.168.1.10".to_string(),
+                port: 7090,
+            },]
+        );
+    }
+
+    #[test]
+    fn derives_single_default_status_station_from_runtime_config() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.44".to_string()),
+            "KEBA_UDP_PORT" => Some("7091".to_string()),
+            "STATION_ID" => Some("carport".to_string()),
+            _ => None,
+        })
+        .expect("config should be valid");
+
+        assert_eq!(
+            result.status_stations,
+            vec![StatusStationConfig {
+                name: "KEBA carport".to_string(),
+                ip: "192.168.1.44".to_string(),
+                port: 7091,
+            }]
         );
     }
 
