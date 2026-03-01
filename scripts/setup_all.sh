@@ -11,7 +11,29 @@ require_cmd() {
   fi
 }
 
-require_cmd cargo
+ensure_cargo() {
+  if command -v cargo >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    return
+  fi
+
+  echo "cargo not found, installing Rust toolchain via rustup..."
+  require_cmd curl
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+  # shellcheck disable=SC1090
+  source "${HOME}/.cargo/env"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo installation failed (cargo still not found in PATH)" >&2
+    exit 1
+  fi
+}
+
+ensure_cargo
 require_cmd sudo
 require_cmd systemctl
 require_cmd install

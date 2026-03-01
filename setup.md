@@ -18,6 +18,7 @@ Alle drei nutzen dieselbe SQLite-DB (`DB_PATH` identisch).
 ```bash
 bash ./scripts/setup_all.sh
 ```
+Hinweis: Wenn `cargo` fehlt, installiert `setup_all.sh` die Rust-Toolchain automatisch via `rustup` (benoetigt `curl` + Internetzugang).
 
 2. Nach Setzen der beiden `KEBA_IP` Werte alle Prozesse starten:
 ```bash
