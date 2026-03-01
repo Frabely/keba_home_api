@@ -92,7 +92,7 @@ impl AppConfig {
             results_output_file: lookup("RESULTS_OUTPUT_FILE")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
-            poll_interval_ms: parse_or_default(&lookup, "POLL_INTERVAL_MS", 1000_u64)?,
+            poll_interval_ms: parse_or_default(&lookup, "POLL_INTERVAL_MS", 3000_u64)?,
             db_path: lookup("DB_PATH")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
@@ -266,7 +266,7 @@ mod tests {
         assert!((result.keba_modbus_energy_factor_wh - 0.1).abs() < f64::EPSILON);
         assert_eq!(result.keba_debug_data_file, None);
         assert_eq!(result.results_output_file, None);
-        assert_eq!(result.poll_interval_ms, 1000);
+        assert_eq!(result.poll_interval_ms, 3000);
         if cfg!(windows) {
             assert_eq!(result.db_path, ".\\data\\keba.db");
         } else {

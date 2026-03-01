@@ -65,7 +65,7 @@
 - Config via ENV + optional `config.toml`:
     - `KEBA_IP` (Wallbox IP)
     - `KEBA_UDP_PORT` (default 7090)
-    - `POLL_INTERVAL_MS` (default 1000)
+    - `POLL_INTERVAL_MS` (default 3000)
     - `DB_PATH` (z. B. `/var/lib/keba/keba.db`)
     - `HTTP_BIND` (z. B. `0.0.0.0:8080`)
     - Optional: `DEBOUNCE_SAMPLES` (default 2)
