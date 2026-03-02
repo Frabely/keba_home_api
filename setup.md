@@ -93,6 +93,7 @@ Wichtig:
 - `KEBA_IP` ist fuer jede Writer-Instanz verpflichtend.
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-carport.env` auf die Carport-Wallbox-IP.
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-eingang.env` auf die Eingang-Wallbox-IP.
+- Fuer die API-Endpunkte `GET /sessions/carport/latest` und `GET /sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash

@@ -104,6 +104,14 @@ impl KebaUdpClient {
             Err(error) => Err(error),
         }
     }
+
+    pub fn get_report100(&self) -> Result<Value, KebaClientError> {
+        self.send_command("report 100")
+    }
+
+    pub fn get_report101(&self) -> Result<Value, KebaClientError> {
+        self.send_command("report 101")
+    }
 }
 
 impl KebaClient for KebaUdpClient {

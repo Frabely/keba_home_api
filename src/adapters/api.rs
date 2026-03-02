@@ -1,12 +1,22 @@
 use actix_web::{HttpResponse, Responder, get, web};
-use chrono::{SecondsFormat, Utc};
+use chrono::{NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::adapters::keba_udp::KebaUdpClient;
 use crate::app::services::{ServiceError, SessionQueryHandler, SqliteSessionService};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub session_queries: SqliteSessionService,
+    pub report100_stations: Vec<Report100Station>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report100Station {
+    pub logical_name: String,
+    pub ip: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -69,6 +79,8 @@ pub struct DiagnosticsLogEventResponse {
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(health)
         .service(get_latest_session_endpoint)
+        .service(get_carport_latest_report100_endpoint)
+        .service(get_entrance_latest_report100_endpoint)
         .service(get_recent_session_endpoint)
         .service(list_sessions_endpoint)
         .service(get_db_diagnostics_endpoint)
@@ -95,6 +107,26 @@ async fn get_latest_session_endpoint(state: web::Data<ApiState>) -> impl Respond
         })),
         Err(error) => service_error_response(error),
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct LatestStationSessionResponse {
+    #[serde(rename = "kWh")]
+    pub kwh: f64,
+    pub started: Option<i64>,
+    pub ended: Option<i64>,
+    #[serde(rename = "CardId")]
+    pub card_id: Value,
+}
+
+#[get("/sessions/carport/latest")]
+async fn get_carport_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
+    latest_report100_response(&state, "carport")
+}
+
+#[get("/sessions/entrance/latest")]
+async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
+    latest_report100_response(&state, "entrance")
 }
 
 #[get("/sessions")]
@@ -223,9 +255,205 @@ fn service_error_response(error: ServiceError) -> HttpResponse {
     }
 }
 
+fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpResponse {
+    let Some(station) = state
+        .report100_stations
+        .iter()
+        .find(|entry| entry.logical_name == station_name)
+    else {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!("station mapping for '{station_name}' is not configured")
+        }));
+    };
+
+    let client = match KebaUdpClient::new(&station.ip, station.port) {
+        Ok(client) => client,
+        Err(error) => {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("failed to initialize report 100 client: {error}")
+            }));
+        }
+    };
+
+    let report100 = match client.get_report100() {
+        Ok(payload) => payload,
+        Err(error) => {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("failed to fetch report 100: {error}")
+            }));
+        }
+    };
+
+    let object = match report100.as_object() {
+        Some(object) => object,
+        None => {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": "report 100 payload must be a json object"
+            }));
+        }
+    };
+
+    let report100_view = extract_latest_station_session_view(object);
+    let effective_view = if matches!(report100_view.ended, Some(0)) {
+        let report101 = match client.get_report101() {
+            Ok(payload) => payload,
+            Err(error) => {
+                return HttpResponse::BadGateway().json(serde_json::json!({
+                    "error": format!("failed to fetch report 101: {error}")
+                }));
+            }
+        };
+        let object101 = match report101.as_object() {
+            Some(object) => object,
+            None => {
+                return HttpResponse::BadGateway().json(serde_json::json!({
+                    "error": "report 101 payload must be a json object"
+                }));
+            }
+        };
+        extract_latest_station_session_view(object101)
+    } else {
+        report100_view
+    };
+
+    if effective_view.started.is_none()
+        || effective_view.ended.is_none()
+        || effective_view.ended.unwrap_or(0) <= 0
+    {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": "report 100/101 payload does not contain valid started/ended timestamps"
+        }));
+    }
+    if effective_view.kwh.is_none() {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": "report 100/101 payload does not contain a numeric E Pres value"
+        }));
+    }
+
+    HttpResponse::Ok().json(LatestStationSessionResponse {
+        kwh: effective_view.kwh.unwrap_or(0.0),
+        started: effective_view.started,
+        ended: effective_view.ended,
+        card_id: effective_view.card_id,
+    })
+}
+
+struct LatestStationSessionView {
+    kwh: Option<f64>,
+    started: Option<i64>,
+    ended: Option<i64>,
+    card_id: Value,
+}
+
+fn extract_latest_station_session_view(
+    object: &serde_json::Map<String, Value>,
+) -> LatestStationSessionView {
+    let kwh = find_number_from_object(
+        object,
+        &[
+            "E Pres",
+            "E pres",
+            "Energy Session",
+            "energy_present_session",
+        ],
+    );
+    let started = find_value_from_object(
+        object,
+        &["started", "Started", "start", "session_start", "Session Start"],
+    )
+    .and_then(extract_timestamp_ms);
+    let ended = find_value_from_object(
+        object,
+        &["ended", "Ended", "end", "session_end", "Session End"],
+    )
+    .and_then(extract_timestamp_ms);
+    let card_id = find_value_from_object(
+        object,
+        &[
+            "RFID",
+            "RFID tag",
+            "RFID Tag",
+            "CardId",
+            "Card ID",
+            "card_id",
+        ],
+    )
+    .cloned()
+    .unwrap_or(Value::Null);
+
+    LatestStationSessionView {
+        kwh,
+        started,
+        ended,
+        card_id,
+    }
+}
+
+fn find_value_from_object<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    aliases: &[&str],
+) -> Option<&'a Value> {
+    for alias in aliases {
+        if let Some(value) = object.get(*alias) {
+            return Some(value);
+        }
+    }
+    let normalized_aliases: Vec<String> = aliases.iter().map(|alias| normalize_key(alias)).collect();
+    object.iter().find_map(|(key, value)| {
+        let normalized_key = normalize_key(key);
+        if normalized_aliases
+            .iter()
+            .any(|alias| alias == &normalized_key)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
+
+fn find_number_from_object(object: &serde_json::Map<String, Value>, aliases: &[&str]) -> Option<f64> {
+    find_value_from_object(object, aliases).and_then(parse_number)
+}
+
+fn parse_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn extract_timestamp_ms(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+                return Some(parsed.timestamp_millis());
+            }
+            if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.3f") {
+                return Some(Utc.from_utc_datetime(&parsed).timestamp_millis());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn normalize_key(input: &str) -> String {
+    input
+        .chars()
+        .filter(|char| char.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::net::UdpSocket;
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     use actix_web::{App, body::to_bytes, http::StatusCode, test, web};
     use rusqlite::Connection;
@@ -236,7 +464,7 @@ mod tests {
     use crate::app::services::SqliteSessionService;
     use crate::test_support::open_test_connection;
 
-    use super::{ApiState, configure_routes};
+    use super::{ApiState, Report100Station, configure_routes, extract_timestamp_ms};
 
     fn build_state_with_migrated_db(name: &str) -> (ApiState, Arc<Mutex<Connection>>) {
         let connection = open_test_connection(name);
@@ -245,6 +473,7 @@ mod tests {
         (
             ApiState {
                 session_queries: SqliteSessionService::new(Arc::clone(&shared_connection)),
+                report100_stations: Vec::new(),
             },
             shared_connection,
         )
@@ -616,5 +845,177 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["code"], "poll.parse_report2");
         assert_eq!(items[0]["detailsJson"], "{\"attempt\":2}");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_returns_report100_payload() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                if cmd == "report 100" {
+                    let payload = r#"{"E Pres":12.34,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"ABC123"}"#;
+                    responder
+                        .send_to(payload.as_bytes(), from)
+                        .expect("responder send should succeed");
+                }
+            }
+        });
+
+        let (mut state, _) = build_state_with_migrated_db("report100-carport-api.sqlite");
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        let expected_started =
+            extract_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
+                .expect("timestamp should parse");
+        let expected_ended = extract_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+            .expect("timestamp should parse");
+        assert_eq!(json["kWh"], 12.34);
+        assert_eq!(json["started"], expected_started);
+        assert_eq!(json["ended"], expected_ended);
+        assert_eq!(json["CardId"], "ABC123");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn entrance_latest_endpoint_returns_404_when_station_mapping_missing() {
+        let (state, _) = build_state_with_migrated_db("report100-entrance-missing-api.sqlite");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/sessions/entrance/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_falls_back_to_report101_when_ended_is_zero() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                let payload = match cmd.as_str() {
+                    "report 100" => {
+                        r#"{"E Pres":9.87,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"ABC123"}"#
+                    }
+                    "report 101" => {
+                        r#"{"E Pres":7.65,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"XYZ999"}"#
+                    }
+                    _ => continue,
+                };
+                responder
+                    .send_to(payload.as_bytes(), from)
+                    .expect("responder send should succeed");
+            }
+        });
+
+        let (mut state, _) = build_state_with_migrated_db("report101-fallback-api.sqlite");
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        let expected_started =
+            extract_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
+                .expect("timestamp should parse");
+        let expected_ended = extract_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+            .expect("timestamp should parse");
+        assert_eq!(json["kWh"], 7.65);
+        assert_eq!(json["started"], expected_started);
+        assert_eq!(json["ended"], expected_ended);
+        assert_eq!(json["CardId"], "XYZ999");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
     }
 }

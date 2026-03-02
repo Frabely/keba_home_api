@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::adapters::api::{ApiState, configure_routes};
+use crate::adapters::api::{ApiState, Report100Station, configure_routes};
 use crate::adapters::db::{DbError, NewLogEventRecord, NewSessionRecord};
 use crate::adapters::keba_debug_file::KebaDebugFileClient;
 use crate::adapters::keba_modbus::KebaModbusClient;
@@ -926,6 +926,7 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         session_queries: session_service.clone(),
+        report100_stations: build_report100_stations(&config),
     };
 
     let status_stations = build_status_stations(&config);
@@ -985,6 +986,7 @@ pub fn run_api(config: AppConfig) -> Result<(), AppError> {
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         session_queries: session_service,
+        report100_stations: build_report100_stations(&config),
     };
 
     run_http_server(&config.http_bind, api_state)
@@ -1024,6 +1026,35 @@ fn build_status_stations(config: &AppConfig) -> Vec<RuntimeConsoleStation> {
             port: station.port,
         })
         .collect()
+}
+
+fn build_report100_stations(config: &AppConfig) -> Vec<Report100Station> {
+    let mut mapped = Vec::new();
+    for station in &config.status_stations {
+        let normalized = station
+            .name
+            .chars()
+            .filter(|char| char.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        let logical_name = if normalized.contains("carport") {
+            Some("carport")
+        } else if normalized.contains("entrance") || normalized.contains("eingang") {
+            Some("entrance")
+        } else {
+            None
+        };
+        if let Some(logical_name) = logical_name
+            && !mapped.iter().any(|entry: &Report100Station| entry.logical_name == logical_name)
+        {
+            mapped.push(Report100Station {
+                logical_name: logical_name.to_string(),
+                ip: station.ip.clone(),
+                port: station.port,
+            });
+        }
+    }
+    mapped
 }
 
 fn build_poller(

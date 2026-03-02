@@ -84,6 +84,36 @@ Example:
 curl -s "http://localhost:8080/sessions?limit=20&offset=0" | jq
 ```
 
+### 3a) Latest Station Session via KEBA `report 100`
+
+`GET /sessions/carport/latest`  
+`GET /sessions/entrance/latest`
+
+Purpose: fetches KEBA live session data directly from the mapped station via UDP `report 100`.
+
+Response shape (`200`):
+
+```json
+{
+  "kWh": 12.34,
+  "started": 1772386819000,
+  "ended": 1772427719000,
+  "CardId": "ABC123"
+}
+```
+
+Examples:
+
+```bash
+curl -s http://localhost:8080/sessions/carport/latest | jq
+curl -s http://localhost:8080/sessions/entrance/latest | jq
+```
+
+Errors:
+- `404` if station mapping is missing (`carport` / `entrance`)
+- `502` if `report 100` cannot be fetched/parsed from station
+- Falls `ended` in `report 100` fehlt oder `<= 0` ist, wird automatisch `report 101` abgefragt und die Antwort komplett aus `report 101` aufgebaut (`kWh`, `started`, `ended`, `CardId`).
+
 ### 4) Recent Session (last 5 minutes)
 
 `GET /sessions/recent`
