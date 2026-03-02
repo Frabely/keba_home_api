@@ -133,4 +133,18 @@ impl KebaClient for KebaModbusClient {
             "Energy (total)": total_kwh
         }))
     }
+
+    fn get_report100(&self) -> Result<Value, KebaClientError> {
+        Err(KebaClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "report 100 is not supported by modbus client",
+        )))
+    }
+
+    fn get_report101(&self) -> Result<Value, KebaClientError> {
+        Err(KebaClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "report 101 is not supported by modbus client",
+        )))
+    }
 }

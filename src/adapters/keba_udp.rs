@@ -11,6 +11,8 @@ const UDP_SOURCE_PORT_DEFAULT: u16 = 7090;
 pub trait KebaClient: Send + Sync + 'static {
     fn get_report2(&self) -> Result<Value, KebaClientError>;
     fn get_report3(&self) -> Result<Value, KebaClientError>;
+    fn get_report100(&self) -> Result<Value, KebaClientError>;
+    fn get_report101(&self) -> Result<Value, KebaClientError>;
 }
 
 #[derive(Debug, Error)]
@@ -121,6 +123,14 @@ impl KebaClient for KebaUdpClient {
 
     fn get_report3(&self) -> Result<Value, KebaClientError> {
         self.send_command("report 3")
+    }
+
+    fn get_report100(&self) -> Result<Value, KebaClientError> {
+        self.send_command("report 100")
+    }
+
+    fn get_report101(&self) -> Result<Value, KebaClientError> {
+        self.send_command("report 101")
     }
 }
 

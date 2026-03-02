@@ -1,42 +1,20 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-use std::{fs, path::Path};
+use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use chrono::{SecondsFormat, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::adapters::api::{ApiState, Report100Station, configure_routes};
-use crate::adapters::db::{DbError, NewLogEventRecord, NewSessionRecord};
 use crate::adapters::keba_debug_file::KebaDebugFileClient;
 use crate::adapters::keba_modbus::KebaModbusClient;
 use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
-use crate::app::config::{AppConfig, KebaSource, StatusStationConfig};
+use crate::app::config::{AppConfig, KebaSource};
 use crate::app::error::AppError;
-use crate::app::services::{ServiceError, SessionCommandHandler, SqliteSessionService};
-use crate::domain::keba_payload::{ParseError, Report2, Report3, parse_report2, parse_report3};
-use crate::domain::session_energy::{EnergySnapshot, compute_session_kwh};
-use crate::domain::session_state::{Clock, SessionStateMachine, SessionTransition, TimestampMs};
-
-const SESSION_PERSIST_MAX_RETRIES: usize = 3;
-const SESSION_PERSIST_RETRY_BACKOFF_MS: u64 = 250;
-const REPORT3_COMPLETION_MAX_ATTEMPTS: usize = 6;
-
-#[derive(Debug, Clone, Copy)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> TimestampMs {
-        TimestampMs(Utc::now().timestamp_millis())
-    }
-}
+use crate::domain::keba_payload::{ParseError, parse_report2};
 
 #[derive(Debug, Error)]
 pub enum PollerError {
@@ -44,877 +22,227 @@ pub enum PollerError {
     FetchReport2(#[source] KebaClientError),
     #[error("failed to parse report 2: {0}")]
     ParseReport2(#[source] ParseError),
-    #[error("database lock poisoned")]
-    DbLockPoisoned,
-    #[error("database write failed: {0}")]
-    Database(#[source] DbError),
-    #[error("results file io failed: {0}")]
-    ResultsIo(#[source] std::io::Error),
 }
 
-pub struct SessionPoller<Cl> {
+pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
-    clock: Cl,
-    session_commands: SqliteSessionService,
-    machine: SessionStateMachine,
-    start_snapshot: Option<EnergySnapshot>,
-    start_total_baseline_kwh: Option<f64>,
-    first_non_charging_total_kwh: Option<f64>,
-    first_non_charging_epres_kwh: Option<f64>,
-    start_report2_raw: Option<String>,
-    start_report3_raw: Option<String>,
-    last_seconds: Option<u64>,
-    source: String,
-    poll_interval_ms: i64,
-    debounce_samples: i64,
-    station_id: Option<String>,
-    error_count_during_session: i64,
-    active_session_bootstrapped: bool,
-    pending_session_log_event_ids: Vec<String>,
-    results_output_file: Option<String>,
+    station_label: String,
+    last_plugged: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
-struct RuntimeConsoleStation {
-    name: String,
-    ip: String,
-    port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StationStatusSnapshot {
-    status: &'static str,
-    plugged: bool,
-    charging: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionResultEntry {
-    from: Option<String>,
-    to: String,
-    #[serde(rename = "durationMs")]
-    duration_ms: i64,
-    kwh: f64,
-}
-
-struct SessionCompletion {
-    energy_kwh: f64,
-    status: &'static str,
-    finished_reason: &'static str,
-    report2_end_raw: String,
-    report3_end_raw: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionPollerConfig {
-    pub source: String,
-    pub poll_interval_ms: u64,
-    pub station_id: Option<String>,
-    pub results_output_file: Option<String>,
-}
-
-impl<Cl: Clock> SessionPoller<Cl> {
-    pub fn new(
-        client: Box<dyn KebaClient>,
-        clock: Cl,
-        session_commands: SqliteSessionService,
-        debounce_samples: usize,
-        config: SessionPollerConfig,
-    ) -> Self {
+impl PlugStatusPoller {
+    pub fn new(client: Box<dyn KebaClient>, station_label: String) -> Self {
         Self {
             client,
-            clock,
-            session_commands,
-            machine: SessionStateMachine::new(debounce_samples),
-            start_snapshot: None,
-            start_total_baseline_kwh: None,
-            first_non_charging_total_kwh: None,
-            first_non_charging_epres_kwh: None,
-            start_report2_raw: None,
-            start_report3_raw: None,
-            last_seconds: None,
-            source: config.source,
-            poll_interval_ms: i64::try_from(config.poll_interval_ms).unwrap_or(i64::MAX),
-            debounce_samples: i64::try_from(debounce_samples).unwrap_or(i64::MAX),
-            station_id: config.station_id,
-            error_count_during_session: 0,
-            active_session_bootstrapped: false,
-            pending_session_log_event_ids: Vec::new(),
-            results_output_file: config.results_output_file,
+            station_label,
+            last_plugged: None,
         }
     }
 
     pub fn tick(&mut self) -> Result<(), PollerError> {
-        tracing::debug!("poll cycle started");
-        let report2_raw = self
-            .client
-            .get_report2()
-            .map_err(PollerError::FetchReport2)?;
-        tracing::debug!(payload = %report2_raw, "received report2 payload");
+        let report2_raw = self.client.get_report2().map_err(PollerError::FetchReport2)?;
         let report2 = parse_report2(&report2_raw).map_err(PollerError::ParseReport2)?;
-        tracing::debug!(
-            plugged = report2.plugged,
-            seconds = report2.seconds,
-            "parsed report2 payload"
-        );
 
-        if let (Some(previous), Some(current)) = (self.last_seconds, report2.seconds)
-            && current < previous
+        if let Some(previous) = self.last_plugged
+            && previous != report2.plugged
         {
-            tracing::warn!(
-                previous_seconds = previous,
-                current_seconds = current,
-                "report2 seconds counter moved backwards"
-            );
-        }
-        self.last_seconds = report2.seconds;
-
-        let transition = if let Some(observed_at) = extract_observed_at(&report2_raw) {
-            self.machine.observe_at(report2.plugged, observed_at)
-        } else {
-            self.machine.observe(report2.plugged, &self.clock)
-        };
-
-        match transition {
-            Some(SessionTransition::Plugged { plugged_at }) => {
-                self.handle_plugged(plugged_at, report2_raw.clone());
-            }
-            Some(SessionTransition::Unplugged {
-                plugged_at,
-                unplugged_at,
-            }) => self.handle_unplugged(plugged_at, unplugged_at, report2_raw)?,
-            None => {
-                if report2.plugged && self.machine.stable_plugged() == Some(true) {
-                    self.bootstrap_active_session_if_needed(&report2_raw);
-                }
-                self.maybe_capture_first_non_charging_marker(&report2_raw, &report2);
-                tracing::debug!(
-                    plugged = report2.plugged,
-                    seconds = report2.seconds,
-                    "no session transition detected"
-                );
-            }
+            self.log_status_change(report2.plugged);
         }
 
-        tracing::debug!("poll cycle completed");
+        self.last_plugged = Some(report2.plugged);
         Ok(())
     }
 
-    pub fn note_poll_error(&mut self, error: &PollerError) {
-        let is_active_session =
-            self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped;
-        if is_active_session {
-            self.error_count_during_session += 1;
-        }
-        self.persist_log_event(
-            "warn",
-            poller_error_code(error),
-            &error.to_string(),
-            is_active_session,
-            Some(json!({
-                "activeSession": is_active_session,
-                "errorCountDuringSession": self.error_count_during_session,
-            })),
-        );
+    pub fn note_poll_error(&mut self, _error: &PollerError) {
+        // Intentionally no default error logging: only status transitions are logged.
     }
 
-    fn persist_log_event(
-        &mut self,
-        level: &str,
-        code: &str,
-        message: &str,
-        link_to_active_session: bool,
-        details: Option<Value>,
-    ) {
-        let log_event = NewLogEventRecord {
-            created_at: timestamp_to_iso8601(self.clock.now()),
-            level: level.to_string(),
-            code: code.to_string(),
-            message: message.to_string(),
-            source: self.source.clone(),
-            station_id: self.station_id.clone(),
-            details_json: details.map(|value| value.to_string()),
-        };
+    fn log_status_change(&self, plugged: bool) {
+        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let status = if plugged { "Angesteckt" } else { "Abgesteckt" };
 
-        match self.session_commands.insert_log_event(&log_event) {
-            Ok(log_event_id) if link_to_active_session => {
-                self.pending_session_log_event_ids.push(log_event_id);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to persist log event");
-            }
-        }
-    }
-
-    fn handle_plugged(&mut self, plugged_at: TimestampMs, report2_raw: Value) {
-        self.start_report2_raw = Some(report2_raw.to_string());
-        self.start_report3_raw = None;
-        self.start_snapshot = None;
-        self.start_total_baseline_kwh = None;
-        self.first_non_charging_total_kwh = None;
-        self.first_non_charging_epres_kwh = None;
-        self.error_count_during_session = 0;
-        self.active_session_bootstrapped = false;
-        self.pending_session_log_event_ids.clear();
-
-        if let Some((report3, report3_raw)) = self.fetch_report3_until_total(
-            "poll.fetch_report3_on_plugged",
-            "poll.parse_report3_on_plugged",
-            true,
-        ) {
-            self.start_report3_raw = Some(report3_raw.to_string());
-            self.start_snapshot = Some(EnergySnapshot {
-                present_session_kwh: report3.present_session_kwh,
-                total_kwh: report3.total_kwh,
-            });
-            if let Some(total_kwh) = report3.total_kwh {
-                let epres = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
-                self.start_total_baseline_kwh = Some((total_kwh - epres).max(0.0));
-            }
-        }
-
-        tracing::info!(
-            plugged_at = %timestamp_to_iso8601(plugged_at),
-            "charging session started"
-        );
-    }
-
-    fn handle_unplugged(
-        &mut self,
-        plugged_at: TimestampMs,
-        unplugged_at: TimestampMs,
-        report2_raw: Value,
-    ) -> Result<(), PollerError> {
-        self.handle_session_completion(plugged_at, unplugged_at, report2_raw)
-    }
-
-    fn handle_session_completion(
-        &mut self,
-        plugged_at: TimestampMs,
-        finished_at: TimestampMs,
-        report2_raw: Value,
-    ) -> Result<(), PollerError> {
-        let completion = self.resolve_completion_from_report3(plugged_at, finished_at, &report2_raw);
-        tracing::debug!(
-            energy_kwh = completion.energy_kwh,
-            status = completion.status,
-            finished_reason = completion.finished_reason,
-            "computed session completion values"
-        );
-        let new_session = self.build_session_record(
-            self.session_started_at(plugged_at),
-            finished_at,
-            completion,
-        );
-
-        let session_id = self.persist_session_and_finalize(&new_session)?;
-
-        tracing::info!(
-            session_id,
-            started_at = ?new_session.started_at,
-            finished_at = %new_session.finished_at,
-            kwh = new_session.energy_kwh,
-            "charging session persisted"
-        );
-
-        if let Some(path) = self.results_output_file.as_deref() {
-            let duration_ms = (finished_at.0 - plugged_at.0).max(0);
-            append_session_result(path, &new_session, duration_ms).map_err(PollerError::ResultsIo)?;
-        }
-
-        Ok(())
-    }
-
-    fn has_active_session(&self) -> bool {
-        self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped
-    }
-
-    fn maybe_capture_first_non_charging_marker(&mut self, report2_raw: &Value, report2: &Report2) {
-        if !self.has_active_session() || !report2.plugged || self.first_non_charging_total_kwh.is_some()
-        {
-            return;
-        }
-
-        if !report2_is_non_charging(report2_raw, report2) {
-            return;
-        }
-
-        if let Some((report3, _raw)) = self.fetch_report3_until_total(
-            "poll.fetch_report3_on_first_non_charging",
-            "poll.parse_report3_on_first_non_charging",
-            true,
-        ) {
-            self.first_non_charging_total_kwh = report3.total_kwh;
-            self.first_non_charging_epres_kwh = report3.present_session_kwh;
-        }
-    }
-
-    fn fetch_report3_until_total(
-        &mut self,
-        fetch_error_code: &str,
-        parse_error_code: &str,
-        link_to_active_session: bool,
-    ) -> Option<(Report3, Value)> {
-        let completion_poll_interval_ms = completion_poll_interval_ms(self.poll_interval_ms);
-        let mut last_raw: Option<Value> = None;
-
-        for attempt in 1..=REPORT3_COMPLETION_MAX_ATTEMPTS {
-            let report3_raw = match self.client.get_report3() {
-                Ok(raw) => raw,
-                Err(error) => {
-                    self.persist_log_event(
-                        "warn",
-                        fetch_error_code,
-                        &error.to_string(),
-                        link_to_active_session,
-                        Some(json!({ "attempt": attempt })),
-                    );
-                    if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
-                        std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
-                    }
-                    continue;
-                }
-            };
-
-            let parsed_report3 = match parse_report3(&report3_raw) {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    self.persist_log_event(
-                        "warn",
-                        parse_error_code,
-                        &error.to_string(),
-                        link_to_active_session,
-                        Some(json!({ "attempt": attempt })),
-                    );
-                    if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
-                        std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
-                    }
-                    continue;
-                }
-            };
-
-            last_raw = Some(report3_raw.clone());
-            if parsed_report3.total_kwh.is_some() {
-                return Some((parsed_report3, report3_raw));
-            }
-
-            self.persist_log_event(
-                "warn",
-                "poll.report3_total_missing",
-                "report3 parsed but total energy missing",
-                link_to_active_session,
-                Some(json!({ "attempt": attempt })),
+        if plugged {
+            tracing::info!(
+                "Zeitstempel: {} | Ladestation: {} | Status: {}",
+                timestamp,
+                self.station_label,
+                status
             );
-            if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
-                std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
-            }
-        }
-
-        if let Some(raw) = last_raw
-            && let Ok(parsed) = parse_report3(&raw)
-        {
-            return Some((parsed, raw));
-        }
-
-        None
-    }
-
-    fn resolve_completion_from_report3(
-        &mut self,
-        plugged_at: TimestampMs,
-        finished_at: TimestampMs,
-        report2_raw: &Value,
-    ) -> SessionCompletion {
-        let report2_end_raw = report2_raw.to_string();
-        let details = json!({
-            "startedAt": timestamp_to_iso8601(plugged_at),
-            "finishedAt": timestamp_to_iso8601(finished_at),
-        });
-
-        let Some((report3, report3_raw)) = self.fetch_report3_until_total(
-            "poll.fetch_report3_on_completion",
-            "poll.parse_report3_on_completion",
-            true,
-        ) else {
-            return SessionCompletion {
-                energy_kwh: 0.0,
-                status: "aborted",
-                finished_reason: "report3_fetch_failed",
-                report2_end_raw,
-                report3_end_raw: None,
-            };
-        };
-
-        tracing::debug!(payload = %report3_raw, "received report3 payload on completion");
-        let end_total = report3.total_kwh;
-        let end_present = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
-
-        if let (Some(total_new), Some(total_old)) = (end_total, self.first_non_charging_total_kwh) {
-            let epres_at_first_non_charging = self.first_non_charging_epres_kwh.unwrap_or(0.0).max(0.0);
-            let kwh = (total_new - total_old - epres_at_first_non_charging).max(0.0);
-            return SessionCompletion {
-                energy_kwh: kwh,
-                status: "completed",
-                finished_reason: "plug_state_transition",
-                report2_end_raw,
-                report3_end_raw: Some(report3_raw.to_string()),
-            };
-        }
-
-        if let (Some(total_new), Some(total_start_baseline)) = (end_total, self.start_total_baseline_kwh) {
-            let kwh = (total_new - total_start_baseline).max(0.0);
-            return SessionCompletion {
-                energy_kwh: kwh,
-                status: "completed",
-                finished_reason: "plug_state_transition",
-                report2_end_raw,
-                report3_end_raw: Some(report3_raw.to_string()),
-            };
-        }
-
-        let end_snapshot = EnergySnapshot {
-            present_session_kwh: Some(end_present),
-            total_kwh: end_total,
-        };
-        let energy = compute_session_kwh(self.start_snapshot.as_ref(), &end_snapshot);
-        match energy {
-            Ok(energy) if energy.warnings.is_empty() => SessionCompletion {
-                energy_kwh: energy.kwh,
-                status: "completed",
-                finished_reason: "plug_state_transition",
-                report2_end_raw,
-                report3_end_raw: Some(report3_raw.to_string()),
-            },
-            Ok(energy) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.energy_warning",
-                    "energy clamped due to negative delta/value",
-                    true,
-                    Some(json!({
-                        "warnings": format!("{:?}", energy.warnings),
-                    })),
-                );
-                SessionCompletion {
-                    energy_kwh: energy.kwh,
-                    status: "invalid",
-                    finished_reason: "energy_clamped",
-                    report2_end_raw,
-                    report3_end_raw: Some(report3_raw.to_string()),
-                }
-            }
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.compute_energy_on_completion",
-                    &error.to_string(),
-                    true,
-                    Some(details),
-                );
-                SessionCompletion {
-                    energy_kwh: 0.0,
-                    status: "invalid",
-                    finished_reason: "energy_compute_failed",
-                    report2_end_raw,
-                    report3_end_raw: Some(report3_raw.to_string()),
-                }
-            }
-        }
-    }
-
-    fn build_session_record(
-        &self,
-        started_at: Option<TimestampMs>,
-        unplugged_at: TimestampMs,
-        completion: SessionCompletion,
-    ) -> NewSessionRecord {
-        let started_at_iso = started_at.map(timestamp_to_iso8601);
-        let started_reason = if started_at_iso.is_some() {
-            "plug_state_transition".to_string()
-        } else {
-            "service_started_while_plugged".to_string()
-        };
-        NewSessionRecord {
-            started_at: started_at_iso,
-            finished_at: timestamp_to_iso8601(unplugged_at),
-            duration_ms: started_at.map_or(0, |value| (unplugged_at.0 - value.0).max(0)),
-            energy_kwh: completion.energy_kwh,
-            source: self.source.clone(),
-            status: completion.status.to_string(),
-            started_reason,
-            finished_reason: completion.finished_reason.to_string(),
-            poll_interval_ms: self.poll_interval_ms,
-            debounce_samples: self.debounce_samples,
-            error_count_during_session: self.error_count_during_session,
-            station_id: self.station_id.clone(),
-            created_at: timestamp_to_iso8601(unplugged_at),
-            raw_report2_start: self.start_report2_raw.clone(),
-            raw_report3_start: self.start_report3_raw.clone(),
-            raw_report2_end: Some(completion.report2_end_raw),
-            raw_report3_end: completion.report3_end_raw,
-        }
-    }
-
-    fn bootstrap_active_session_if_needed(&mut self, report2_raw: &Value) {
-        if self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped {
             return;
         }
 
-        self.start_report2_raw = Some(report2_raw.to_string());
-        self.start_report3_raw = None;
-        self.error_count_during_session = 0;
-        self.pending_session_log_event_ids.clear();
-        self.start_snapshot = None;
-        self.start_total_baseline_kwh = None;
-        self.first_non_charging_total_kwh = None;
-        self.first_non_charging_epres_kwh = None;
-        self.active_session_bootstrapped = true;
+        let disconnected_at_ms = Utc::now().timestamp_millis();
+        let details = self.fetch_unplug_details(disconnected_at_ms);
+        tracing::info!(
+            "Zeitstempel: {} | Ladestation: {} | Status: {} | Start: {} | Ende: {} | kWh: {} | CardId: {}",
+            timestamp,
+            self.station_label,
+            status,
+            details.started,
+            details.ended,
+            details.kwh,
+            details.card_id
+        );
+    }
 
-        if let Some((report3, report3_raw)) = self.fetch_report3_until_total(
-            "poll.fetch_report3_on_bootstrap_plugged",
-            "poll.parse_report3_on_bootstrap_plugged",
-            false,
+    fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
+        let report100 = match self.client.get_report100() {
+            Ok(payload) => payload,
+            Err(_) => return UnplugLogDetails::na(),
+        };
+        let object100 = match report100.as_object() {
+            Some(object) => object,
+            None => return UnplugLogDetails::na(),
+        };
+        let ended_100 = find_value(object100, &["ended", "Ended"]).and_then(parse_f64);
+        let selected_payload = if matches!(
+            ended_100,
+            Some(0.0)
         ) {
-            self.start_report3_raw = Some(report3_raw.to_string());
-            self.start_snapshot = Some(EnergySnapshot {
-                present_session_kwh: report3.present_session_kwh,
-                total_kwh: report3.total_kwh,
-            });
-            if let Some(total_kwh) = report3.total_kwh {
-                let epres = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
-                self.start_total_baseline_kwh = Some((total_kwh - epres).max(0.0));
+            match self.client.get_report101() {
+                Ok(payload) => payload,
+                Err(_) => return UnplugLogDetails::na(),
             }
-        }
-
-        tracing::info!("bootstrapped active session with unknown start time");
-    }
-
-    fn session_started_at(&self, plugged_at: TimestampMs) -> Option<TimestampMs> {
-        if self.active_session_bootstrapped {
-            None
         } else {
-            Some(plugged_at)
-        }
-    }
-
-    fn persist_session_and_finalize(
-        &mut self,
-        new_session: &NewSessionRecord,
-    ) -> Result<String, PollerError> {
-        let mut insert_attempt = 0_usize;
-        let session_id = loop {
-            match self.session_commands.insert_session(new_session) {
-                Ok(session_id) => break session_id,
-                Err(error)
-                    if is_retryable_db_contention(&error)
-                        && insert_attempt < SESSION_PERSIST_MAX_RETRIES =>
-                {
-                    insert_attempt += 1;
-                    let sleep_ms = SESSION_PERSIST_RETRY_BACKOFF_MS * insert_attempt as u64;
-                    tracing::warn!(
-                        attempt = insert_attempt,
-                        max_attempts = SESSION_PERSIST_MAX_RETRIES,
-                        sleep_ms,
-                        error = %error,
-                        "session insert hit db contention; retrying"
-                    );
-                    std::thread::sleep(Duration::from_millis(sleep_ms));
-                }
-                Err(error) => return Err(service_error_to_poller_error(error)),
-            }
+            report100
+        };
+        let selected = match selected_payload.as_object() {
+            Some(object) => object,
+            None => return UnplugLogDetails::na(),
         };
 
-        let mut link_attempt = 0_usize;
-        loop {
-            match self
-                .session_commands
-                .link_session_log_events(&session_id, &self.pending_session_log_event_ids)
-            {
-                Ok(()) => break,
-                Err(error)
-                    if is_retryable_db_contention(&error)
-                        && link_attempt < SESSION_PERSIST_MAX_RETRIES =>
-                {
-                    link_attempt += 1;
-                    let sleep_ms = SESSION_PERSIST_RETRY_BACKOFF_MS * link_attempt as u64;
-                    tracing::warn!(
-                        attempt = link_attempt,
-                        max_attempts = SESSION_PERSIST_MAX_RETRIES,
-                        sleep_ms,
-                        error = %error,
-                        session_id,
-                        "session-log linking hit db contention; retrying"
-                    );
-                    std::thread::sleep(Duration::from_millis(sleep_ms));
-                }
-                Err(error) => return Err(service_error_to_poller_error(error)),
-            }
-        }
-
-        self.start_snapshot = None;
-        self.start_total_baseline_kwh = None;
-        self.first_non_charging_total_kwh = None;
-        self.first_non_charging_epres_kwh = None;
-        self.start_report2_raw = None;
-        self.start_report3_raw = None;
-        self.error_count_during_session = 0;
-        self.active_session_bootstrapped = false;
-        self.pending_session_log_event_ids.clear();
-
-        Ok(session_id)
-    }
-}
-
-fn append_session_result(
-    path: &str,
-    session: &NewSessionRecord,
-    duration_ms: i64,
-) -> Result<(), std::io::Error> {
-    let mut existing = if Path::new(path).exists() {
-        let content = fs::read_to_string(path)?;
-        if content.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str::<Vec<SessionResultEntry>>(&content).map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("failed to parse existing results json: {error}"),
-                )
-            })?
-        }
-    } else {
-        Vec::new()
-    };
-
-    existing.push(SessionResultEntry {
-        from: session.started_at.clone(),
-        to: session.finished_at.clone(),
-        duration_ms,
-        kwh: session.energy_kwh,
-    });
-
-    if let Some(parent) = Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let json = serde_json::to_string_pretty(&existing).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to serialize results json: {error}"),
+        let kwh = find_value(
+            selected,
+            &["E Pres", "E pres", "Energy Session", "energy_present_session"],
         )
-    })?;
-    fs::write(path, json)?;
-    Ok(())
-}
+        .and_then(parse_f64)
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".to_string());
+        let card_id = find_value(
+            selected,
+            &[
+                "RFID",
+                "RFID tag",
+                "RFID Tag",
+                "CardId",
+                "Card ID",
+                "card_id",
+            ],
+        )
+        .map(stringify_value)
+        .unwrap_or_else(|| "n/a".to_string());
 
-fn log_console_station_statuses(
-    stations: &[RuntimeConsoleStation],
-    last_snapshots: &mut [Option<StationStatusSnapshot>],
-) {
-    for (index, station) in stations.iter().enumerate() {
-        match fetch_report_pair(station) {
-            Ok((report2, report3)) => {
-                let snapshot = derive_station_status_snapshot(&report2, &report3);
-                let previous = &last_snapshots[index];
-                if previous.as_ref() != Some(&snapshot) {
-                    tracing::info!(
-                        station = %station.name,
-                        ip = %station.ip,
-                        previous_status = previous
-                            .as_ref()
-                            .map(|state| state.status)
-                            .unwrap_or("unknown"),
-                        status = snapshot.status,
-                        plugged = snapshot.plugged,
-                        charging = snapshot.charging,
-                        energy = %session_energy_text(&report3),
-                        "station status changed"
-                    );
-                }
-                tracing::info!(
-                    station = %station.name,
-                    ip = %station.ip,
-                    status = snapshot.status,
-                    plugged = snapshot.plugged,
-                    charging = snapshot.charging,
-                    energy = %session_energy_text(&report3),
-                    "station heartbeat"
-                );
-                last_snapshots[index] = Some(snapshot);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    station = %station.name,
-                    ip = %station.ip,
-                    error = %error,
-                    "station status polling failed"
-                );
-            }
+        let started = parse_session_timestamp_ms_from_object(
+            selected,
+            &["started", "Started", "start", "session_start", "Session Start"],
+            disconnected_at_ms,
+        )
+        .map(format_ts)
+        .unwrap_or_else(|| "n/a".to_string());
+        let ended = parse_session_timestamp_ms_from_object(
+            selected,
+            &["ended", "Ended", "end", "session_end", "Session End"],
+            disconnected_at_ms,
+        )
+        .map(format_ts)
+        .unwrap_or_else(|| "n/a".to_string());
+
+        UnplugLogDetails {
+            started,
+            ended,
+            kwh,
+            card_id,
         }
     }
 }
 
-fn derive_station_status_snapshot(report2: &Value, report3: &Value) -> StationStatusSnapshot {
-    let plugged = find_number(report2, &["Plug"]).unwrap_or(0.0) != 0.0;
-    let charging = find_number(report3, &["P"]).unwrap_or(0.0) > 0.0;
-    StationStatusSnapshot {
-        status: derive_console_status(report2, report3),
-        plugged,
-        charging,
+struct UnplugLogDetails {
+    started: String,
+    ended: String,
+    kwh: String,
+    card_id: String,
+}
+
+impl UnplugLogDetails {
+    fn na() -> Self {
+        Self {
+            started: "n/a".to_string(),
+            ended: "n/a".to_string(),
+            kwh: "n/a".to_string(),
+            card_id: "n/a".to_string(),
+        }
     }
 }
 
-fn fetch_report_pair(station: &RuntimeConsoleStation) -> Result<(Value, Value), KebaClientError> {
-    tracing::debug!(
-        station = %station.name,
-        ip = %station.ip,
-        port = station.port,
-        "fetching station status reports"
-    );
-    let client = KebaUdpClient::new(&station.ip, station.port)?;
-    let report2 = client.get_report2()?;
-    let report3 = client.get_report3()?;
-    tracing::debug!(
-        station = %station.name,
-        ip = %station.ip,
-        report2 = %report2,
-        report3 = %report3,
-        "fetched station status reports"
-    );
-    Ok((report2, report3))
-}
-
-fn derive_console_status(report2: &Value, report3: &Value) -> &'static str {
-    let plugged = find_number(report2, &["Plug"]).unwrap_or(0.0) != 0.0;
-    let enabled = find_number(report2, &["Enable sys"]).unwrap_or(0.0) == 1.0
-        && find_number(report2, &["Enable user"]).unwrap_or(0.0) == 1.0
-        && find_number(report2, &["Max curr"]).unwrap_or(0.0) > 0.0;
-    let fault = find_number(report2, &["Error1"]).unwrap_or(0.0) != 0.0
-        || find_number(report2, &["Error2"]).unwrap_or(0.0) != 0.0;
-    let charging = find_number(report3, &["P"]).unwrap_or(0.0) > 0.0;
-
-    if fault {
-        "Fehler"
-    } else if !plugged {
-        "Nicht angesteckt"
-    } else if charging {
-        "Laedt"
-    } else if !enabled {
-        "Angesteckt, gesperrt/deaktiviert"
-    } else {
-        "Angesteckt, wartet/bereit"
-    }
-}
-
-fn session_energy_text(report3: &Value) -> String {
-    let e_pres = find_number(report3, &["E pres"]).map(|raw| raw / 10_000.0);
-    let energy_kwh = e_pres.or_else(|| find_number(report3, &["Energy (present session)"]));
-    match energy_kwh {
-        Some(kwh) => format!("{kwh:.3} kWh"),
+fn format_ts(value_ms: i64) -> String {
+    match Utc.timestamp_millis_opt(value_ms).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         None => "n/a".to_string(),
     }
 }
 
-fn find_number(payload: &Value, aliases: &[&str]) -> Option<f64> {
-    let object = payload.as_object()?;
-
-    for alias in aliases {
-        if let Some(value) = object.get(*alias)
-            && let Some(parsed) = parse_number(value)
-        {
-            return Some(parsed);
-        }
-    }
-
-    let normalized_aliases: Vec<String> =
-        aliases.iter().map(|alias| normalize_key(alias)).collect();
-    object.iter().find_map(|(key, value)| {
-        let normalized_key = normalize_key(key);
-        if normalized_aliases
-            .iter()
-            .any(|alias| alias == &normalized_key)
-        {
-            parse_number(value)
-        } else {
-            None
-        }
-    })
+fn find_value<'a>(object: &'a serde_json::Map<String, Value>, aliases: &[&str]) -> Option<&'a Value> {
+    aliases.iter().find_map(|alias| object.get(*alias))
 }
 
-fn normalize_key(input: &str) -> String {
-    input
-        .chars()
-        .filter(|char| char.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn parse_number(value: &Value) -> Option<f64> {
+fn parse_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
-        Value::String(text) => parse_number_from_text(text),
+        Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
         _ => None,
     }
 }
 
-fn parse_number_from_text(text: &str) -> Option<f64> {
-    let cleaned = text.trim().replace(',', ".");
-    let token = cleaned
-        .split(|char: char| !char.is_ascii_digit() && char != '.' && char != '-')
-        .find(|part| !part.is_empty())?;
-    token.parse::<f64>().ok()
+fn stringify_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
 }
 
-fn extract_observed_at(report2_raw: &Value) -> Option<TimestampMs> {
-    let object = report2_raw.as_object()?;
-    let ts_ms = object.get("__tsMs")?.as_i64()?;
-    Some(TimestampMs(ts_ms))
+fn parse_absolute_timestamp_ms(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+                return Some(parsed.timestamp_millis());
+            }
+            if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.3f") {
+                return Some(Utc.from_utc_datetime(&parsed).timestamp_millis());
+            }
+            text.trim().parse::<i64>().ok()
+        }
+        _ => None,
+    }
 }
 
-fn completion_poll_interval_ms(poll_interval_ms: i64) -> u64 {
-    let poll_interval_ms = poll_interval_ms.max(1) as u64;
-    (poll_interval_ms / 2).max(1)
-}
-
-fn report2_is_non_charging(report2_raw: &Value, report2: &Report2) -> bool {
-    if let Some(state) = report2.state {
-        return state != 3;
+fn parse_session_timestamp_ms_from_object(
+    object: &serde_json::Map<String, Value>,
+    aliases: &[&str],
+    now_ms: i64,
+) -> Option<i64> {
+    let sec_from_report = find_value(object, &["Sec", "sec", "Seconds", "seconds"]).and_then(parse_f64);
+    let value = find_value(object, aliases)?;
+    if let Some(sec_now) = sec_from_report
+        && let Some(raw_seconds) = parse_f64(value)
+        && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
+    {
+        let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
+        return Some(ts.round() as i64);
     }
 
-    report2_indicates_disabled_or_waiting(report2_raw)
+    parse_absolute_timestamp_ms(value)
 }
 
-fn report2_indicates_disabled_or_waiting(report2_raw: &Value) -> bool {
-    let enable_sys = find_number(report2_raw, &["Enable sys"]).unwrap_or(1.0);
-    let enable_user = find_number(report2_raw, &["Enable user"]).unwrap_or(1.0);
-    let max_curr = find_number(report2_raw, &["Max curr"]).unwrap_or(1.0);
-    enable_sys != 1.0 || enable_user != 1.0 || max_curr <= 0.0
-}
-
-fn start_poller<Cl>(
-    mut poller: SessionPoller<Cl>,
+fn start_poller(
+    mut poller: PlugStatusPoller,
     poll_interval: Duration,
-    status_log_interval: Duration,
-    status_stations: Vec<RuntimeConsoleStation>,
     stop_flag: Arc<AtomicBool>,
-) -> JoinHandle<()>
-where
-    Cl: Clock + Send + 'static,
-{
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut next_status_log = Instant::now();
-        let mut last_station_snapshots = vec![None; status_stations.len()];
         while !stop_flag.load(Ordering::Relaxed) {
             if let Err(error) = poller.tick() {
                 poller.note_poll_error(&error);
-                tracing::warn!(error = %error, "poll cycle failed");
-            }
-            if next_status_log.elapsed() >= status_log_interval {
-                log_console_station_statuses(&status_stations, &mut last_station_snapshots);
-                next_status_log = Instant::now();
             }
             std::thread::sleep(poll_interval);
         }
@@ -923,33 +251,23 @@ where
 
 pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let shared_connection = open_shared_connection_writer(&config.db_path)?;
-    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
+    let session_service = crate::app::services::SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
-        session_queries: session_service.clone(),
+        session_queries: session_service,
         report100_stations: build_report100_stations(&config),
     };
 
-    let status_stations = build_status_stations(&config);
-    let mut poller = build_poller(&config, session_service)?;
-
-    if config.keba_source == KebaSource::DebugFile {
-        return run_debug_replay_loop(&mut poller, config.poll_interval_ms);
-    }
-
+    let poller = build_poller(&config)?;
     let stop_flag = Arc::new(AtomicBool::new(false));
     let poller_handle = start_poller(
         poller,
         Duration::from_millis(config.poll_interval_ms),
-        Duration::from_secs(config.status_log_interval_seconds),
-        status_stations,
         Arc::clone(&stop_flag),
     );
 
     let server_result = run_http_server(&config.http_bind, api_state);
-
     stop_flag.store(true, Ordering::Relaxed);
     let join_result = poller_handle.join();
-
     if join_result.is_err() {
         return Err(AppError::runtime("poller thread panicked"));
     }
@@ -958,32 +276,23 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
 }
 
 pub fn run_service(config: AppConfig) -> Result<(), AppError> {
-    let shared_connection = open_shared_connection_writer(&config.db_path)?;
-    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
-    let status_stations = build_status_stations(&config);
-    let mut poller = build_poller(&config, session_service)?;
+    let mut poller = build_poller(&config)?;
 
     if config.keba_source == KebaSource::DebugFile {
         return run_debug_replay_loop(&mut poller, config.poll_interval_ms);
     }
 
-    let poller_handle = start_poller(
-        poller,
-        Duration::from_millis(config.poll_interval_ms),
-        Duration::from_secs(config.status_log_interval_seconds),
-        status_stations,
-        Arc::new(AtomicBool::new(false)),
-    );
-
-    match poller_handle.join() {
-        Ok(()) => Ok(()),
-        Err(_) => Err(AppError::runtime("poller thread panicked")),
+    loop {
+        if let Err(error) = poller.tick() {
+            poller.note_poll_error(&error);
+        }
+        std::thread::sleep(Duration::from_millis(config.poll_interval_ms));
     }
 }
 
 pub fn run_api(config: AppConfig) -> Result<(), AppError> {
     let shared_connection = open_shared_connection_reader(&config.db_path)?;
-    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
+    let session_service = crate::app::services::SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         session_queries: session_service,
         report100_stations: build_report100_stations(&config),
@@ -1012,20 +321,31 @@ fn open_shared_connection_reader(db_path: &str) -> Result<Arc<Mutex<Connection>>
     Ok(Arc::new(Mutex::new(connection)))
 }
 
-fn build_status_stations(config: &AppConfig) -> Vec<RuntimeConsoleStation> {
-    if config.keba_source == KebaSource::DebugFile {
-        return Vec::new();
-    }
+fn build_poller(config: &AppConfig) -> Result<PlugStatusPoller, AppError> {
+    let keba_client = build_keba_client(config)?;
+    Ok(PlugStatusPoller::new(
+        keba_client,
+        station_label(config.station_id.as_deref()),
+    ))
+}
 
-    config
-        .status_stations
-        .iter()
-        .map(|station: &StatusStationConfig| RuntimeConsoleStation {
-            name: station.name.clone(),
-            ip: station.ip.clone(),
-            port: station.port,
-        })
-        .collect()
+fn station_label(station_id: Option<&str>) -> String {
+    let Some(raw) = station_id else {
+        return "Unbekannt".to_string();
+    };
+    let normalized = raw
+        .chars()
+        .filter(|char| char.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+
+    if normalized.contains("carport") {
+        "Carport".to_string()
+    } else if normalized.contains("eingang") || normalized.contains("entrance") {
+        "Eingang".to_string()
+    } else {
+        raw.to_string()
+    }
 }
 
 fn build_report100_stations(config: &AppConfig) -> Vec<Report100Station> {
@@ -1057,25 +377,6 @@ fn build_report100_stations(config: &AppConfig) -> Vec<Report100Station> {
     mapped
 }
 
-fn build_poller(
-    config: &AppConfig,
-    session_service: SqliteSessionService,
-) -> Result<SessionPoller<SystemClock>, AppError> {
-    let keba_client = build_keba_client(config)?;
-    Ok(SessionPoller::new(
-        keba_client,
-        SystemClock,
-        session_service,
-        config.debounce_samples,
-        SessionPollerConfig {
-            source: keba_source_label(config.keba_source).to_string(),
-            poll_interval_ms: config.poll_interval_ms,
-            station_id: config.station_id.clone(),
-            results_output_file: config.results_output_file.clone(),
-        },
-    ))
-}
-
 fn build_keba_client(config: &AppConfig) -> Result<Box<dyn KebaClient>, AppError> {
     let keba_client: Box<dyn KebaClient> = match config.keba_source {
         KebaSource::Udp => Box::new(
@@ -1103,20 +404,18 @@ fn build_keba_client(config: &AppConfig) -> Result<Box<dyn KebaClient>, AppError
     Ok(keba_client)
 }
 
-fn run_debug_replay_loop(
-    poller: &mut SessionPoller<SystemClock>,
-    poll_interval_ms: u64,
-) -> Result<(), AppError> {
+fn run_debug_replay_loop(poller: &mut PlugStatusPoller, poll_interval_ms: u64) -> Result<(), AppError> {
     loop {
         match poller.tick() {
             Ok(()) => std::thread::sleep(Duration::from_millis(poll_interval_ms)),
-            Err(error) if is_debug_replay_finished(&error) => {
+            Err(PollerError::FetchReport2(KebaClientError::Io(io)))
+                if io.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
                 tracing::info!("debug replay finished");
                 return Ok(());
             }
             Err(error) => {
                 poller.note_poll_error(&error);
-                tracing::warn!(error = %error, "poll cycle failed");
                 std::thread::sleep(Duration::from_millis(poll_interval_ms));
             }
         }
@@ -1138,535 +437,3 @@ fn run_http_server(http_bind: &str, api_state: ApiState) -> Result<(), AppError>
     server_result.map_err(AppError::runtime)
 }
 
-fn service_error_to_poller_error(error: crate::app::services::ServiceError) -> PollerError {
-    match error {
-        crate::app::services::ServiceError::DbLockPoisoned => PollerError::DbLockPoisoned,
-        crate::app::services::ServiceError::Database(db_error) => PollerError::Database(db_error),
-    }
-}
-
-fn is_retryable_db_contention(error: &ServiceError) -> bool {
-    match error {
-        ServiceError::DbLockPoisoned => false,
-        ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(db_error, _))) => {
-            db_error.code == rusqlite::ErrorCode::DatabaseBusy
-                || db_error.code == rusqlite::ErrorCode::DatabaseLocked
-        }
-        _ => false,
-    }
-}
-
-fn is_debug_replay_finished(error: &PollerError) -> bool {
-    match error {
-        PollerError::FetchReport2(KebaClientError::Io(io)) => {
-            io.kind() == std::io::ErrorKind::UnexpectedEof
-        }
-        _ => false,
-    }
-}
-
-fn poller_error_code(error: &PollerError) -> &'static str {
-    match error {
-        PollerError::FetchReport2(_) => "poll.fetch_report2",
-        PollerError::ParseReport2(_) => "poll.parse_report2",
-        PollerError::DbLockPoisoned => "poll.db_lock_poisoned",
-        PollerError::Database(_) => "poll.database",
-        PollerError::ResultsIo(_) => "poll.results_io",
-    }
-}
-
-fn keba_source_label(source: KebaSource) -> &'static str {
-    match source {
-        KebaSource::Udp => "udp",
-        KebaSource::Modbus => "modbus",
-        KebaSource::DebugFile => "debug_file",
-    }
-}
-
-fn timestamp_to_iso8601(timestamp: TimestampMs) -> String {
-    let datetime = chrono::DateTime::<Utc>::from_timestamp_millis(timestamp.0)
-        .unwrap_or_else(|| chrono::DateTime::<Utc>::from(std::time::UNIX_EPOCH));
-    datetime.to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-    use std::net::UdpSocket;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
-
-    use crate::adapters::db::{
-        DbError, count_log_events, count_session_log_events, get_latest_session, list_sessions,
-    };
-    use crate::adapters::keba_debug_file::KebaDebugFileClient;
-    use crate::adapters::keba_udp::KebaUdpClient;
-    use crate::app::services::{ServiceError, SqliteSessionService};
-    use crate::test_support::open_test_connection;
-
-    use super::{Clock, SessionPoller, SessionPollerConfig, TimestampMs};
-
-    struct StepClock {
-        values: Vec<i64>,
-        index: Cell<usize>,
-    }
-
-    impl StepClock {
-        fn new(values: Vec<i64>) -> Self {
-            Self {
-                values,
-                index: Cell::new(0),
-            }
-        }
-    }
-
-    impl Clock for StepClock {
-        fn now(&self) -> TimestampMs {
-            let index = self.index.get();
-            self.index.set(index + 1);
-            TimestampMs(*self.values.get(index).unwrap_or(&0))
-        }
-    }
-
-    #[test]
-    fn persists_session_from_simulated_udp_responder() {
-        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
-        responder
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .expect("read timeout should be configurable");
-        let responder_port = responder
-            .local_addr()
-            .expect("addr should be available")
-            .port();
-
-        let responder_handle = thread::spawn(move || {
-            let report2_frames = [
-                r#"{"Plug":0,"Seconds":10}"#,
-                r#"{"Plug":0,"Seconds":11}"#,
-                r#"{"Plug":7,"Seconds":12}"#,
-                r#"{"Plug":7,"Seconds":13}"#,
-                r#"{"Plug":0,"Seconds":14}"#,
-                r#"{"Plug":0,"Seconds":15}"#,
-            ];
-            let report3_frames = [
-                r#"{"E pres":2000,"Total energy":100000}"#,
-                r#"{"E pres":7000,"Total energy":105000}"#,
-            ];
-            let mut report2_idx = 0_usize;
-            let mut report3_idx = 0_usize;
-            let mut buffer = [0_u8; 256];
-
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
-                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
-
-                if cmd == "shutdown-test-responder" {
-                    break;
-                }
-
-                let payload = match cmd.as_str() {
-                    "report 2" => {
-                        let value = report2_frames[report2_idx.min(report2_frames.len() - 1)];
-                        report2_idx += 1;
-                        value
-                    }
-                    "report 3" => {
-                        let value = report3_frames[report3_idx.min(report3_frames.len() - 1)];
-                        report3_idx += 1;
-                        value
-                    }
-                    _ => r#"{"error":"unknown command"}"#,
-                };
-
-                responder
-                    .send_to(payload.as_bytes(), from)
-                    .expect("responder send should succeed");
-            }
-        });
-
-        let connection = open_test_connection("poller-runtime.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let client =
-            Box::new(KebaUdpClient::new("127.0.0.1", responder_port).expect("client should build"));
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..6 {
-            poller.tick().expect("poll tick should succeed");
-        }
-
-        {
-            let locked = shared_connection
-                .lock()
-                .expect("database lock should be available");
-            let latest = get_latest_session(&locked)
-                .expect("db query should succeed")
-                .expect("session should exist");
-            assert_eq!(latest.energy_kwh, 7.0);
-            assert_eq!(
-                latest.started_at.as_deref(),
-                Some("2023-11-14T22:13:20.000Z")
-            );
-            assert_eq!(latest.finished_at, "2023-11-14T22:14:20.000Z");
-        }
-
-        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
-        shutdown_socket
-            .send_to(
-                b"shutdown-test-responder",
-                format!("127.0.0.1:{responder_port}"),
-            )
-            .expect("shutdown message should be sent");
-        responder_handle
-            .join()
-            .expect("responder thread should terminate cleanly");
-    }
-
-    #[test]
-    fn debug_file_client_with_intermittent_failures_still_persists_session() {
-        let connection = open_test_connection("poller-debug-file.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/poller_recovery.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..8 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let latest = get_latest_session(&locked)
-            .expect("db query should succeed")
-            .expect("session should exist");
-        assert!(latest.energy_kwh > 0.0);
-        assert!(
-            count_log_events(&locked).expect("log count query should succeed") >= 1,
-            "expected at least one persisted log event"
-        );
-        assert!(
-            count_session_log_events(&locked, &latest.id)
-                .expect("session-log count query should succeed")
-                >= 1,
-            "expected at least one linked session log event"
-        );
-    }
-
-    #[test]
-    fn writes_multiple_completed_sessions_to_results_json() {
-        let connection = open_test_connection("poller-results-json.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let results_path = std::path::Path::new("./target/testdb/results.json").to_path_buf();
-        let fixture = format!(
-            "{}/testdata/debug/happy_loop.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![
-            1_700_000_000_000,
-            1_700_000_060_000,
-            1_700_000_120_000,
-            1_700_000_180_000,
-        ]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            1,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: Some(results_path.to_string_lossy().to_string()),
-            },
-        );
-
-        for _ in 0..8 {
-            let _ = poller.tick();
-        }
-
-        let content = std::fs::read_to_string(&results_path).expect("results json should exist");
-        let entries: Vec<serde_json::Value> =
-            serde_json::from_str(&content).expect("results json should parse");
-        assert!(entries.len() >= 2);
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry["kwh"].as_f64().unwrap_or(0.0) >= 0.0)
-        );
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry["durationMs"].as_i64().unwrap_or(-1) >= 0)
-        );
-    }
-
-    #[test]
-    fn persists_session_with_completion_polling_when_report3_temporarily_fails() {
-        let connection = open_test_connection("poller-aborted-unplugged.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/aborted_report3_fetch_on_unplugged.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..6 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let latest = get_latest_session(&locked)
-            .expect("db query should succeed")
-            .expect("session should exist");
-        assert_eq!(latest.status, "completed");
-        assert_eq!(latest.finished_reason, "plug_state_transition");
-        assert!(latest.energy_kwh >= 0.0);
-    }
-
-    #[test]
-    fn persists_session_when_completion_polling_reaches_usable_energy_snapshot() {
-        let connection = open_test_connection("poller-invalid-energy.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/invalid_energy_source_switch.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..6 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let latest = get_latest_session(&locked)
-            .expect("db query should succeed")
-            .expect("session should exist");
-        assert_eq!(latest.status, "completed");
-        assert_eq!(latest.finished_reason, "plug_state_transition");
-        assert!(latest.energy_kwh >= 0.0);
-    }
-
-    #[test]
-    fn bootstrapped_plugged_session_persists_energy_with_null_started_at() {
-        let connection = open_test_connection("poller-bootstrapped-plugged.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/startup_plugged_total_diff.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..4 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let latest = get_latest_session(&locked)
-            .expect("db query should succeed")
-            .expect("session should exist");
-        assert_eq!(latest.energy_kwh, 5.0);
-        assert_eq!(latest.started_at, None);
-        assert_eq!(latest.started_reason, "service_started_while_plugged");
-        assert_eq!(latest.finished_reason, "plug_state_transition");
-    }
-
-    #[test]
-    fn debounce_flap_at_start_does_not_create_session() {
-        let connection = open_test_connection("poller-flap-start.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/flap_start_no_session.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..16 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let sessions = list_sessions(&locked, 10, 0).expect("db query should succeed");
-        assert_eq!(sessions.len(), 0);
-    }
-
-    #[test]
-    fn debounce_flap_at_end_creates_single_session_once_stable() {
-        let connection = open_test_connection("poller-flap-end.sqlite");
-        let shared_connection = Arc::new(Mutex::new(connection));
-
-        let fixture = format!(
-            "{}/testdata/debug/flap_end_single_session.json",
-            env!("CARGO_MANIFEST_DIR").replace("\\", "/")
-        );
-        let client = Box::new(
-            KebaDebugFileClient::from_file(&fixture).expect("debug file client should build"),
-        );
-        let clock = StepClock::new(vec![1_700_000_000_000, 1_700_000_060_000]);
-        let mut poller = SessionPoller::new(
-            client,
-            clock,
-            SqliteSessionService::new(Arc::clone(&shared_connection)),
-            2,
-            SessionPollerConfig {
-                source: "debug_file".to_string(),
-                poll_interval_ms: 1000,
-                station_id: None,
-                results_output_file: None,
-            },
-        );
-
-        for _ in 0..18 {
-            let _ = poller.tick();
-        }
-
-        let locked = shared_connection
-            .lock()
-            .expect("database lock should be available");
-        let sessions = list_sessions(&locked, 10, 0).expect("db query should succeed");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(
-            sessions[0].started_at.as_deref(),
-            Some("2026-02-27T14:42:00.000Z")
-        );
-        assert_eq!(sessions[0].finished_at, "2026-02-27T14:46:00.000Z");
-        assert_eq!(sessions[0].energy_kwh, 5.0);
-    }
-
-    #[test]
-    fn retries_only_for_sqlite_busy_or_locked_errors() {
-        let busy_error = ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::DatabaseBusy,
-                extended_code: 5,
-            },
-            Some("database is locked".to_string()),
-        )));
-        let locked_error = ServiceError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::DatabaseLocked,
-                extended_code: 6,
-            },
-            Some("database table is locked".to_string()),
-        )));
-        let other_error =
-            ServiceError::Database(DbError::Sqlite(rusqlite::Error::ExecuteReturnedResults));
-
-        assert!(super::is_retryable_db_contention(&busy_error));
-        assert!(super::is_retryable_db_contention(&locked_error));
-        assert!(!super::is_retryable_db_contention(&other_error));
-        assert!(!super::is_retryable_db_contention(
-            &ServiceError::DbLockPoisoned
-        ));
-    }
-}

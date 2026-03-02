@@ -150,6 +150,20 @@ impl KebaClient for KebaDebugFileClient {
     fn get_report3(&self) -> Result<Value, KebaClientError> {
         Self::execute_event(self.next_event(false)?)
     }
+
+    fn get_report100(&self) -> Result<Value, KebaClientError> {
+        Err(KebaClientError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "report 100 is not supported by debug-file client",
+        )))
+    }
+
+    fn get_report101(&self) -> Result<Value, KebaClientError> {
+        Err(KebaClientError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "report 101 is not supported by debug-file client",
+        )))
+    }
 }
 
 #[cfg(test)]

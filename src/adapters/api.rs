@@ -293,8 +293,17 @@ fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpRespon
         }
     };
 
-    let report100_view = extract_latest_station_session_view(object);
-    let effective_view = if matches!(report100_view.ended, Some(0)) {
+    let now_ms = Utc::now().timestamp_millis();
+    let ended_is_zero_in_report100 = find_value_from_object(
+        object,
+        &["ended", "Ended", "end", "session_end", "Session End"],
+    )
+    .and_then(parse_number)
+    .map(|value| value == 0.0)
+    .unwrap_or(false);
+
+    let report100_view = extract_latest_station_session_view(object, now_ms);
+    let effective_view = if ended_is_zero_in_report100 {
         let report101 = match client.get_report101() {
             Ok(payload) => payload,
             Err(error) => {
@@ -311,7 +320,7 @@ fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpRespon
                 }));
             }
         };
-        extract_latest_station_session_view(object101)
+        extract_latest_station_session_view(object101, now_ms)
     } else {
         report100_view
     };
@@ -347,7 +356,9 @@ struct LatestStationSessionView {
 
 fn extract_latest_station_session_view(
     object: &serde_json::Map<String, Value>,
+    now_ms: i64,
 ) -> LatestStationSessionView {
+    let sec_from_report = find_number_from_object(object, &["Sec", "sec", "Seconds", "seconds"]);
     let kwh = find_number_from_object(
         object,
         &[
@@ -361,12 +372,12 @@ fn extract_latest_station_session_view(
         object,
         &["started", "Started", "start", "session_start", "Session Start"],
     )
-    .and_then(extract_timestamp_ms);
+    .and_then(|value| parse_session_timestamp_ms(value, now_ms, sec_from_report));
     let ended = find_value_from_object(
         object,
         &["ended", "Ended", "end", "session_end", "Session End"],
     )
-    .and_then(extract_timestamp_ms);
+    .and_then(|value| parse_session_timestamp_ms(value, now_ms, sec_from_report));
     let card_id = find_value_from_object(
         object,
         &[
@@ -424,7 +435,7 @@ fn parse_number(value: &Value) -> Option<f64> {
     }
 }
 
-fn extract_timestamp_ms(value: &Value) -> Option<i64> {
+fn parse_absolute_timestamp_ms(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number.as_i64(),
         Value::String(text) => {
@@ -438,6 +449,18 @@ fn extract_timestamp_ms(value: &Value) -> Option<i64> {
         }
         _ => None,
     }
+}
+
+fn parse_session_timestamp_ms(value: &Value, now_ms: i64, sec_from_report100: Option<f64>) -> Option<i64> {
+    if let Some(sec_now) = sec_from_report100
+        && let Some(raw_seconds) = parse_number(value)
+        && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
+    {
+        let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
+        return Some(ts.round() as i64);
+    }
+
+    parse_absolute_timestamp_ms(value)
 }
 
 fn normalize_key(input: &str) -> String {
@@ -456,6 +479,7 @@ mod tests {
     use std::time::Duration;
 
     use actix_web::{App, body::to_bytes, http::StatusCode, test, web};
+    use chrono::Utc;
     use rusqlite::Connection;
 
     use crate::adapters::db::{
@@ -464,7 +488,7 @@ mod tests {
     use crate::app::services::SqliteSessionService;
     use crate::test_support::open_test_connection;
 
-    use super::{ApiState, Report100Station, configure_routes, extract_timestamp_ms};
+    use super::{ApiState, Report100Station, configure_routes, parse_absolute_timestamp_ms};
 
     fn build_state_with_migrated_db(name: &str) -> (ApiState, Arc<Mutex<Connection>>) {
         let connection = open_test_connection(name);
@@ -901,9 +925,9 @@ mod tests {
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
         let expected_started =
-            extract_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
                 .expect("timestamp should parse");
-        let expected_ended = extract_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+        let expected_ended = parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
             .expect("timestamp should parse");
         assert_eq!(json["kWh"], 12.34);
         assert_eq!(json["started"], expected_started);
@@ -998,14 +1022,99 @@ mod tests {
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
         let expected_started =
-            extract_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
                 .expect("timestamp should parse");
-        let expected_ended = extract_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+        let expected_ended = parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
             .expect("timestamp should parse");
         assert_eq!(json["kWh"], 7.65);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
         assert_eq!(json["CardId"], "XYZ999");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_converts_relative_started_ended_with_sec() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                if cmd == "report 100" {
+                    let payload =
+                        r#"{"E Pres":4.2,"Sec":"40000000","started":"26332000","ended":"35131000","RFID tag":"REL1"}"#;
+                    responder
+                        .send_to(payload.as_bytes(), from)
+                        .expect("responder send should succeed");
+                }
+            }
+        });
+
+        let (mut state, _) = build_state_with_migrated_db("report100-relative-sec-api.sqlite");
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let now_before = Utc::now().timestamp_millis();
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let now_after = Utc::now().timestamp_millis();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+
+        let sec_now = 40_000_000.0_f64;
+        let started_raw = 26_332_000.0_f64;
+        let ended_raw = 35_131_000.0_f64;
+        let expected_started_min = (now_before as f64 - (sec_now - started_raw) * 1000.0) as i64 - 2000;
+        let expected_started_max = (now_after as f64 - (sec_now - started_raw) * 1000.0) as i64 + 2000;
+        let expected_ended_min = (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
+        let expected_ended_max = (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
+
+        let started = json["started"].as_i64().expect("started should be i64");
+        let ended = json["ended"].as_i64().expect("ended should be i64");
+        assert!(started >= expected_started_min && started <= expected_started_max);
+        assert!(ended >= expected_ended_min && ended <= expected_ended_max);
+        assert_eq!(json["kWh"], 4.2);
+        assert_eq!(json["CardId"], "REL1");
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
         shutdown_socket
