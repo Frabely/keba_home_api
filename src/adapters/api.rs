@@ -809,7 +809,7 @@ mod tests {
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["schemaVersion"], 5);
+        assert_eq!(json["schemaVersion"], 6);
         assert_eq!(json["sessionsCount"], 1);
         assert_eq!(json["logEventsCount"], 1);
         assert_eq!(json["latestSession"]["status"], "completed");

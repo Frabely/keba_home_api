@@ -2,11 +2,11 @@ use rusqlite::{Connection, OpenFlags, params};
 use thiserror::Error;
 
 pub use crate::domain::models::{
-    LogEventRecord, NewLogEventRecord, NewSessionRecord, SessionRecord,
+    LogEventRecord, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord, SessionRecord,
 };
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (
@@ -264,6 +264,23 @@ CREATE INDEX IF NOT EXISTS idx_charging_sessions_station_created_at_desc
 ON charging_sessions (station_id, created_at DESC);
 "#,
     ),
+    (
+        6,
+        r#"
+CREATE TABLE IF NOT EXISTS unplug_log_events (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    station TEXT NOT NULL,
+    started TEXT NOT NULL,
+    ended TEXT NOT NULL,
+    kwh TEXT NOT NULL,
+    card_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_unplug_log_events_timestamp_desc
+ON unplug_log_events (timestamp DESC, id DESC);
+"#,
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -403,6 +420,28 @@ pub fn insert_log_event(
         ],
     )?;
 
+    Ok(id)
+}
+
+pub fn insert_unplug_log_event(
+    connection: &Connection,
+    new_event: &NewUnplugLogRecord,
+) -> Result<String, DbError> {
+    let id = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO unplug_log_events (
+            id, timestamp, station, started, ended, kwh, card_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            new_event.timestamp,
+            new_event.station,
+            new_event.started,
+            new_event.ended,
+            new_event.kwh,
+            new_event.card_id,
+        ],
+    )?;
     Ok(id)
 }
 
@@ -607,10 +646,10 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        LATEST_SCHEMA_VERSION, NewLogEventRecord, NewSessionRecord, count_log_events,
-        count_session_log_events, get_latest_session, get_latest_session_since, insert_log_event,
-        insert_session, link_session_log_events, list_sessions, open_connection, run_migrations,
-        schema_version,
+        LATEST_SCHEMA_VERSION, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord,
+        count_log_events, count_session_log_events, get_latest_session, get_latest_session_since,
+        insert_log_event, insert_session, insert_unplug_log_event, link_session_log_events,
+        list_sessions, open_connection, run_migrations, schema_version,
     };
 
     fn temp_db_path(name: &str) -> PathBuf {
@@ -694,6 +733,15 @@ mod tests {
             .expect("charging_session_log_events table check should work");
         assert_eq!(session_log_events_exists, 1);
 
+        let unplug_events_exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='unplug_log_events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unplug_log_events table check should work");
+        assert_eq!(unplug_events_exists, 1);
+
         let old_table_exists: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
@@ -720,6 +768,50 @@ mod tests {
             )
             .expect("charging_sessions index check should work");
         assert_eq!(index_exists, 1);
+    }
+
+    #[test]
+    fn inserts_unplug_log_event() {
+        let db_path = temp_db_path("unplug-log.sqlite");
+        let mut connection =
+            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
+        run_migrations(&mut connection).expect("migrations should succeed");
+
+        let event = NewUnplugLogRecord {
+            timestamp: "2026-03-02 18:00:00".to_string(),
+            station: "Carport".to_string(),
+            started: "2026-03-02 17:30:00".to_string(),
+            ended: "2026-03-02 18:00:00".to_string(),
+            kwh: "7.650".to_string(),
+            card_id: "XYZ999".to_string(),
+        };
+
+        let id = insert_unplug_log_event(&connection, &event).expect("insert should succeed");
+
+        let stored: (String, String, String, String, String, String, String) = connection
+            .query_row(
+                "SELECT id, timestamp, station, started, ended, kwh, card_id FROM unplug_log_events WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("stored row should exist");
+
+        assert_eq!(stored.1, "2026-03-02 18:00:00");
+        assert_eq!(stored.2, "Carport");
+        assert_eq!(stored.3, "2026-03-02 17:30:00");
+        assert_eq!(stored.4, "2026-03-02 18:00:00");
+        assert_eq!(stored.5, "7.650");
+        assert_eq!(stored.6, "XYZ999");
     }
 
     #[test]

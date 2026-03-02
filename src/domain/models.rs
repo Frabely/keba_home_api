@@ -63,3 +63,13 @@ pub struct LogEventRecord {
     pub station_id: Option<String>,
     pub details_json: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewUnplugLogRecord {
+    pub timestamp: String,
+    pub station: String,
+    pub started: String,
+    pub ended: String,
+    pub kwh: String,
+    pub card_id: String,
+}

@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::adapters::db;
 use crate::adapters::db::DbError;
-use crate::domain::models::{LogEventRecord, NewLogEventRecord, NewSessionRecord, SessionRecord};
+use crate::domain::models::{
+    LogEventRecord, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord, SessionRecord,
+};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -31,6 +33,10 @@ pub trait SessionQueryHandler {
 pub trait SessionCommandHandler {
     fn insert_session(&self, new_session: &NewSessionRecord) -> Result<String, ServiceError>;
     fn insert_log_event(&self, new_log_event: &NewLogEventRecord) -> Result<String, ServiceError>;
+    fn insert_unplug_log_event(
+        &self,
+        new_event: &NewUnplugLogRecord,
+    ) -> Result<String, ServiceError>;
     fn link_session_log_events(
         &self,
         session_id: &str,
@@ -100,6 +106,13 @@ impl SessionCommandHandler for SqliteSessionService {
 
     fn insert_log_event(&self, new_log_event: &NewLogEventRecord) -> Result<String, ServiceError> {
         self.with_connection(|connection| db::insert_log_event(connection, new_log_event))
+    }
+
+    fn insert_unplug_log_event(
+        &self,
+        new_event: &NewUnplugLogRecord,
+    ) -> Result<String, ServiceError> {
+        self.with_connection(|connection| db::insert_unplug_log_event(connection, new_event))
     }
 
     fn link_session_log_events(

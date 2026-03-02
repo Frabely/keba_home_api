@@ -14,7 +14,9 @@ use crate::adapters::keba_modbus::KebaModbusClient;
 use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
 use crate::app::config::{AppConfig, KebaSource};
 use crate::app::error::AppError;
+use crate::app::services::{SessionCommandHandler, SqliteSessionService};
 use crate::domain::keba_payload::{ParseError, parse_report2};
+use crate::domain::models::NewUnplugLogRecord;
 
 #[derive(Debug, Error)]
 pub enum PollerError {
@@ -26,14 +28,20 @@ pub enum PollerError {
 
 pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
+    session_commands: SqliteSessionService,
     station_label: String,
     last_plugged: Option<bool>,
 }
 
 impl PlugStatusPoller {
-    pub fn new(client: Box<dyn KebaClient>, station_label: String) -> Self {
+    pub fn new(
+        client: Box<dyn KebaClient>,
+        session_commands: SqliteSessionService,
+        station_label: String,
+    ) -> Self {
         Self {
             client,
+            session_commands,
             station_label,
             last_plugged: None,
         }
@@ -83,6 +91,15 @@ impl PlugStatusPoller {
             details.kwh,
             details.card_id
         );
+        let event = NewUnplugLogRecord {
+            timestamp,
+            station: self.station_label.clone(),
+            started: details.started,
+            ended: details.ended,
+            kwh: details.kwh,
+            card_id: details.card_id,
+        };
+        let _ = self.session_commands.insert_unplug_log_event(&event);
     }
 
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
@@ -251,13 +268,13 @@ fn start_poller(
 
 pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let shared_connection = open_shared_connection_writer(&config.db_path)?;
-    let session_service = crate::app::services::SqliteSessionService::new(Arc::clone(&shared_connection));
+    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
-        session_queries: session_service,
+        session_queries: session_service.clone(),
         report100_stations: build_report100_stations(&config),
     };
 
-    let poller = build_poller(&config)?;
+    let poller = build_poller(&config, session_service.clone())?;
     let stop_flag = Arc::new(AtomicBool::new(false));
     let poller_handle = start_poller(
         poller,
@@ -276,7 +293,9 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
 }
 
 pub fn run_service(config: AppConfig) -> Result<(), AppError> {
-    let mut poller = build_poller(&config)?;
+    let shared_connection = open_shared_connection_writer(&config.db_path)?;
+    let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
+    let mut poller = build_poller(&config, session_service)?;
 
     if config.keba_source == KebaSource::DebugFile {
         return run_debug_replay_loop(&mut poller, config.poll_interval_ms);
@@ -321,10 +340,14 @@ fn open_shared_connection_reader(db_path: &str) -> Result<Arc<Mutex<Connection>>
     Ok(Arc::new(Mutex::new(connection)))
 }
 
-fn build_poller(config: &AppConfig) -> Result<PlugStatusPoller, AppError> {
+fn build_poller(
+    config: &AppConfig,
+    session_service: SqliteSessionService,
+) -> Result<PlugStatusPoller, AppError> {
     let keba_client = build_keba_client(config)?;
     Ok(PlugStatusPoller::new(
         keba_client,
+        session_service,
         station_label(config.station_id.as_deref()),
     ))
 }
