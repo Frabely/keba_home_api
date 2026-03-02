@@ -5,6 +5,7 @@ use thiserror::Error;
 pub struct Report2 {
     pub plugged: bool,
     pub seconds: Option<u64>,
+    pub state: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,10 @@ const PRESENT_ENERGY_KEYS: &[EnergyAlias] = &[
 
 const TOTAL_ENERGY_KEYS: &[EnergyAlias] = &[
     EnergyAlias {
+        key: "E total",
+        unit: EnergyUnit::Wh,
+    },
+    EnergyAlias {
         key: "Total energy",
         unit: EnergyUnit::Wh,
     },
@@ -84,8 +89,13 @@ pub fn parse_report2(payload: &Value) -> Result<Report2, ParseError> {
         .ok_or(ParseError::MissingField("Plug|State"))?;
 
     let seconds = find_number(object, SECONDS_KEYS).and_then(f64_to_non_negative_u64);
+    let state = find_number(object, STATE_KEYS).and_then(f64_to_i64);
 
-    Ok(Report2 { plugged, seconds })
+    Ok(Report2 {
+        plugged,
+        seconds,
+        state,
+    })
 }
 
 pub fn parse_report3(payload: &Value) -> Result<Report3, ParseError> {
@@ -218,6 +228,14 @@ fn f64_to_non_negative_u64(value: f64) -> Option<u64> {
     Some(value.floor() as u64)
 }
 
+fn f64_to_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    Some(value.floor() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ParseError, Report2, Report3, parse_report2, parse_report3};
@@ -234,6 +252,7 @@ mod tests {
             Report2 {
                 plugged: true,
                 seconds: Some(4_264_958),
+                state: None,
             }
         );
     }
@@ -249,6 +268,7 @@ mod tests {
             Report2 {
                 plugged: true,
                 seconds: Some(4_264_958),
+                state: Some(1),
             }
         );
     }
@@ -264,6 +284,7 @@ mod tests {
             Report2 {
                 plugged: false,
                 seconds: Some(99),
+                state: Some(0),
             }
         );
     }

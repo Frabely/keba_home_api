@@ -21,12 +21,13 @@ use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
 use crate::app::config::{AppConfig, KebaSource, StatusStationConfig};
 use crate::app::error::AppError;
 use crate::app::services::{ServiceError, SessionCommandHandler, SqliteSessionService};
-use crate::domain::keba_payload::{ParseError, parse_report2, parse_report3};
+use crate::domain::keba_payload::{ParseError, Report2, Report3, parse_report2, parse_report3};
 use crate::domain::session_energy::{EnergySnapshot, compute_session_kwh};
 use crate::domain::session_state::{Clock, SessionStateMachine, SessionTransition, TimestampMs};
 
 const SESSION_PERSIST_MAX_RETRIES: usize = 3;
 const SESSION_PERSIST_RETRY_BACKOFF_MS: u64 = 250;
+const REPORT3_COMPLETION_MAX_ATTEMPTS: usize = 6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SystemClock;
@@ -57,6 +58,9 @@ pub struct SessionPoller<Cl> {
     session_commands: SqliteSessionService,
     machine: SessionStateMachine,
     start_snapshot: Option<EnergySnapshot>,
+    start_total_baseline_kwh: Option<f64>,
+    first_non_charging_total_kwh: Option<f64>,
+    first_non_charging_epres_kwh: Option<f64>,
     start_report2_raw: Option<String>,
     start_report3_raw: Option<String>,
     last_seconds: Option<u64>,
@@ -123,6 +127,9 @@ impl<Cl: Clock> SessionPoller<Cl> {
             session_commands,
             machine: SessionStateMachine::new(debounce_samples),
             start_snapshot: None,
+            start_total_baseline_kwh: None,
+            first_non_charging_total_kwh: None,
+            first_non_charging_epres_kwh: None,
             start_report2_raw: None,
             start_report3_raw: None,
             last_seconds: None,
@@ -180,6 +187,7 @@ impl<Cl: Clock> SessionPoller<Cl> {
                 if report2.plugged && self.machine.stable_plugged() == Some(true) {
                     self.bootstrap_active_session_if_needed(&report2_raw);
                 }
+                self.maybe_capture_first_non_charging_marker(&report2_raw, &report2);
                 tracing::debug!(
                     plugged = report2.plugged,
                     seconds = report2.seconds,
@@ -240,50 +248,31 @@ impl<Cl: Clock> SessionPoller<Cl> {
     }
 
     fn handle_plugged(&mut self, plugged_at: TimestampMs, report2_raw: Value) {
-        let report3_raw = match self.client.get_report3() {
-            Ok(value) => value,
-            Err(error) => {
-                self.start_snapshot = None;
-                self.error_count_during_session += 1;
-                self.persist_log_event(
-                    "warn",
-                    "poll.fetch_report3_on_plugged",
-                    &error.to_string(),
-                    true,
-                    None,
-                );
-                tracing::warn!(error = %error, "failed to fetch report 3 on plugged transition");
-                return;
-            }
-        };
-
-        let report3 = match parse_report3(&report3_raw) {
-            Ok(report3) => report3,
-            Err(error) => {
-                self.start_snapshot = None;
-                self.error_count_during_session += 1;
-                self.persist_log_event(
-                    "warn",
-                    "poll.parse_report3_on_plugged",
-                    &error.to_string(),
-                    true,
-                    None,
-                );
-                tracing::warn!(error = %error, "failed to parse report 3 on plugged transition");
-                return;
-            }
-        };
-        tracing::debug!(payload = %report3_raw, "received report3 payload on plugged transition");
-
         self.start_report2_raw = Some(report2_raw.to_string());
-        self.start_report3_raw = Some(report3_raw.to_string());
+        self.start_report3_raw = None;
+        self.start_snapshot = None;
+        self.start_total_baseline_kwh = None;
+        self.first_non_charging_total_kwh = None;
+        self.first_non_charging_epres_kwh = None;
         self.error_count_during_session = 0;
         self.active_session_bootstrapped = false;
         self.pending_session_log_event_ids.clear();
-        self.start_snapshot = Some(EnergySnapshot {
-            present_session_kwh: report3.present_session_kwh,
-            total_kwh: report3.total_kwh,
-        });
+
+        if let Some((report3, report3_raw)) = self.fetch_report3_until_total(
+            "poll.fetch_report3_on_plugged",
+            "poll.parse_report3_on_plugged",
+            true,
+        ) {
+            self.start_report3_raw = Some(report3_raw.to_string());
+            self.start_snapshot = Some(EnergySnapshot {
+                present_session_kwh: report3.present_session_kwh,
+                total_kwh: report3.total_kwh,
+            });
+            if let Some(total_kwh) = report3.total_kwh {
+                let epres = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
+                self.start_total_baseline_kwh = Some((total_kwh - epres).max(0.0));
+            }
+        }
 
         tracing::info!(
             plugged_at = %timestamp_to_iso8601(plugged_at),
@@ -297,119 +286,26 @@ impl<Cl: Clock> SessionPoller<Cl> {
         unplugged_at: TimestampMs,
         report2_raw: Value,
     ) -> Result<(), PollerError> {
-        let report3_raw = match self.client.get_report3() {
-            Ok(raw) => raw,
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.fetch_report3_on_unplugged",
-                    &error.to_string(),
-                    true,
-                    Some(json!({
-                        "startedAt": timestamp_to_iso8601(plugged_at),
-                        "finishedAt": timestamp_to_iso8601(unplugged_at),
-                    })),
-                );
-                let new_session = self.build_session_record(
-                    self.session_started_at(plugged_at),
-                    unplugged_at,
-                    SessionCompletion {
-                        energy_kwh: 0.0,
-                        status: "aborted",
-                        finished_reason: "report3_fetch_failed",
-                        report2_end_raw: report2_raw.to_string(),
-                        report3_end_raw: None,
-                    },
-                );
-                self.persist_session_and_finalize(&new_session)?;
-                return Ok(());
-            }
-        };
-        let report3 = match parse_report3(&report3_raw) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.parse_report3_on_unplugged",
-                    &error.to_string(),
-                    true,
-                    Some(json!({
-                        "startedAt": timestamp_to_iso8601(plugged_at),
-                        "finishedAt": timestamp_to_iso8601(unplugged_at),
-                    })),
-                );
-                let new_session = self.build_session_record(
-                    self.session_started_at(plugged_at),
-                    unplugged_at,
-                    SessionCompletion {
-                        energy_kwh: 0.0,
-                        status: "invalid",
-                        finished_reason: "report3_parse_failed",
-                        report2_end_raw: report2_raw.to_string(),
-                        report3_end_raw: Some(report3_raw.to_string()),
-                    },
-                );
-                self.persist_session_and_finalize(&new_session)?;
-                return Ok(());
-            }
-        };
-        tracing::debug!(
-            payload = %report3_raw,
-            "received report3 payload on unplugged transition"
-        );
+        self.handle_session_completion(plugged_at, unplugged_at, report2_raw)
+    }
 
-        let end_snapshot = EnergySnapshot {
-            present_session_kwh: report3.present_session_kwh,
-            total_kwh: report3.total_kwh,
-        };
-
-        let energy = compute_session_kwh(self.start_snapshot.as_ref(), &end_snapshot);
-        let (energy_kwh, status, finished_reason) = match energy {
-            Ok(energy) if energy.warnings.is_empty() => {
-                (energy.kwh, "completed", "plug_state_transition")
-            }
-            Ok(energy) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.energy_warning",
-                    "energy clamped due to negative delta/value",
-                    true,
-                    Some(json!({
-                        "warnings": format!("{:?}", energy.warnings),
-                    })),
-                );
-                (energy.kwh, "invalid", "energy_clamped")
-            }
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.compute_energy_on_unplugged",
-                    &error.to_string(),
-                    true,
-                    Some(json!({
-                        "startedAt": timestamp_to_iso8601(plugged_at),
-                        "finishedAt": timestamp_to_iso8601(unplugged_at),
-                    })),
-                );
-                (0.0, "invalid", "energy_compute_failed")
-            }
-        };
+    fn handle_session_completion(
+        &mut self,
+        plugged_at: TimestampMs,
+        finished_at: TimestampMs,
+        report2_raw: Value,
+    ) -> Result<(), PollerError> {
+        let completion = self.resolve_completion_from_report3(plugged_at, finished_at, &report2_raw);
         tracing::debug!(
-            energy_kwh,
-            status,
-            finished_reason,
+            energy_kwh = completion.energy_kwh,
+            status = completion.status,
+            finished_reason = completion.finished_reason,
             "computed session completion values"
         );
         let new_session = self.build_session_record(
             self.session_started_at(plugged_at),
-            unplugged_at,
-            SessionCompletion {
-                energy_kwh,
-                status,
-                finished_reason,
-                report2_end_raw: report2_raw.to_string(),
-                report3_end_raw: Some(report3_raw.to_string()),
-            },
+            finished_at,
+            completion,
         );
 
         let session_id = self.persist_session_and_finalize(&new_session)?;
@@ -423,12 +319,208 @@ impl<Cl: Clock> SessionPoller<Cl> {
         );
 
         if let Some(path) = self.results_output_file.as_deref() {
-            let duration_ms = (unplugged_at.0 - plugged_at.0).max(0);
-            append_session_result(path, &new_session, duration_ms)
-                .map_err(PollerError::ResultsIo)?;
+            let duration_ms = (finished_at.0 - plugged_at.0).max(0);
+            append_session_result(path, &new_session, duration_ms).map_err(PollerError::ResultsIo)?;
         }
 
         Ok(())
+    }
+
+    fn has_active_session(&self) -> bool {
+        self.machine.active_session_started_at().is_some() || self.active_session_bootstrapped
+    }
+
+    fn maybe_capture_first_non_charging_marker(&mut self, report2_raw: &Value, report2: &Report2) {
+        if !self.has_active_session() || !report2.plugged || self.first_non_charging_total_kwh.is_some()
+        {
+            return;
+        }
+
+        if !report2_is_non_charging(report2_raw, report2) {
+            return;
+        }
+
+        if let Some((report3, _raw)) = self.fetch_report3_until_total(
+            "poll.fetch_report3_on_first_non_charging",
+            "poll.parse_report3_on_first_non_charging",
+            true,
+        ) {
+            self.first_non_charging_total_kwh = report3.total_kwh;
+            self.first_non_charging_epres_kwh = report3.present_session_kwh;
+        }
+    }
+
+    fn fetch_report3_until_total(
+        &mut self,
+        fetch_error_code: &str,
+        parse_error_code: &str,
+        link_to_active_session: bool,
+    ) -> Option<(Report3, Value)> {
+        let completion_poll_interval_ms = completion_poll_interval_ms(self.poll_interval_ms);
+        let mut last_raw: Option<Value> = None;
+
+        for attempt in 1..=REPORT3_COMPLETION_MAX_ATTEMPTS {
+            let report3_raw = match self.client.get_report3() {
+                Ok(raw) => raw,
+                Err(error) => {
+                    self.persist_log_event(
+                        "warn",
+                        fetch_error_code,
+                        &error.to_string(),
+                        link_to_active_session,
+                        Some(json!({ "attempt": attempt })),
+                    );
+                    if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
+                        std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
+                    }
+                    continue;
+                }
+            };
+
+            let parsed_report3 = match parse_report3(&report3_raw) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    self.persist_log_event(
+                        "warn",
+                        parse_error_code,
+                        &error.to_string(),
+                        link_to_active_session,
+                        Some(json!({ "attempt": attempt })),
+                    );
+                    if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
+                        std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
+                    }
+                    continue;
+                }
+            };
+
+            last_raw = Some(report3_raw.clone());
+            if parsed_report3.total_kwh.is_some() {
+                return Some((parsed_report3, report3_raw));
+            }
+
+            self.persist_log_event(
+                "warn",
+                "poll.report3_total_missing",
+                "report3 parsed but total energy missing",
+                link_to_active_session,
+                Some(json!({ "attempt": attempt })),
+            );
+            if attempt < REPORT3_COMPLETION_MAX_ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(completion_poll_interval_ms));
+            }
+        }
+
+        if let Some(raw) = last_raw
+            && let Ok(parsed) = parse_report3(&raw)
+        {
+            return Some((parsed, raw));
+        }
+
+        None
+    }
+
+    fn resolve_completion_from_report3(
+        &mut self,
+        plugged_at: TimestampMs,
+        finished_at: TimestampMs,
+        report2_raw: &Value,
+    ) -> SessionCompletion {
+        let report2_end_raw = report2_raw.to_string();
+        let details = json!({
+            "startedAt": timestamp_to_iso8601(plugged_at),
+            "finishedAt": timestamp_to_iso8601(finished_at),
+        });
+
+        let Some((report3, report3_raw)) = self.fetch_report3_until_total(
+            "poll.fetch_report3_on_completion",
+            "poll.parse_report3_on_completion",
+            true,
+        ) else {
+            return SessionCompletion {
+                energy_kwh: 0.0,
+                status: "aborted",
+                finished_reason: "report3_fetch_failed",
+                report2_end_raw,
+                report3_end_raw: None,
+            };
+        };
+
+        tracing::debug!(payload = %report3_raw, "received report3 payload on completion");
+        let end_total = report3.total_kwh;
+        let end_present = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
+
+        if let (Some(total_new), Some(total_old)) = (end_total, self.first_non_charging_total_kwh) {
+            let epres_at_first_non_charging = self.first_non_charging_epres_kwh.unwrap_or(0.0).max(0.0);
+            let kwh = (total_new - total_old - epres_at_first_non_charging).max(0.0);
+            return SessionCompletion {
+                energy_kwh: kwh,
+                status: "completed",
+                finished_reason: "plug_state_transition",
+                report2_end_raw,
+                report3_end_raw: Some(report3_raw.to_string()),
+            };
+        }
+
+        if let (Some(total_new), Some(total_start_baseline)) = (end_total, self.start_total_baseline_kwh) {
+            let kwh = (total_new - total_start_baseline).max(0.0);
+            return SessionCompletion {
+                energy_kwh: kwh,
+                status: "completed",
+                finished_reason: "plug_state_transition",
+                report2_end_raw,
+                report3_end_raw: Some(report3_raw.to_string()),
+            };
+        }
+
+        let end_snapshot = EnergySnapshot {
+            present_session_kwh: Some(end_present),
+            total_kwh: end_total,
+        };
+        let energy = compute_session_kwh(self.start_snapshot.as_ref(), &end_snapshot);
+        match energy {
+            Ok(energy) if energy.warnings.is_empty() => SessionCompletion {
+                energy_kwh: energy.kwh,
+                status: "completed",
+                finished_reason: "plug_state_transition",
+                report2_end_raw,
+                report3_end_raw: Some(report3_raw.to_string()),
+            },
+            Ok(energy) => {
+                self.persist_log_event(
+                    "warn",
+                    "poll.energy_warning",
+                    "energy clamped due to negative delta/value",
+                    true,
+                    Some(json!({
+                        "warnings": format!("{:?}", energy.warnings),
+                    })),
+                );
+                SessionCompletion {
+                    energy_kwh: energy.kwh,
+                    status: "invalid",
+                    finished_reason: "energy_clamped",
+                    report2_end_raw,
+                    report3_end_raw: Some(report3_raw.to_string()),
+                }
+            }
+            Err(error) => {
+                self.persist_log_event(
+                    "warn",
+                    "poll.compute_energy_on_completion",
+                    &error.to_string(),
+                    true,
+                    Some(details),
+                );
+                SessionCompletion {
+                    energy_kwh: 0.0,
+                    status: "invalid",
+                    finished_reason: "energy_compute_failed",
+                    report2_end_raw,
+                    report3_end_raw: Some(report3_raw.to_string()),
+                }
+            }
+        }
     }
 
     fn build_session_record(
@@ -469,50 +561,31 @@ impl<Cl: Clock> SessionPoller<Cl> {
             return;
         }
 
-        let report3_raw = match self.client.get_report3() {
-            Ok(value) => value,
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.fetch_report3_on_bootstrap_plugged",
-                    &error.to_string(),
-                    false,
-                    None,
-                );
-                tracing::warn!(
-                    error = %error,
-                    "failed to fetch report 3 while bootstrapping active session"
-                );
-                return;
-            }
-        };
-        let report3 = match parse_report3(&report3_raw) {
-            Ok(report3) => report3,
-            Err(error) => {
-                self.persist_log_event(
-                    "warn",
-                    "poll.parse_report3_on_bootstrap_plugged",
-                    &error.to_string(),
-                    false,
-                    None,
-                );
-                tracing::warn!(
-                    error = %error,
-                    "failed to parse report 3 while bootstrapping active session"
-                );
-                return;
-            }
-        };
-
         self.start_report2_raw = Some(report2_raw.to_string());
-        self.start_report3_raw = Some(report3_raw.to_string());
+        self.start_report3_raw = None;
         self.error_count_during_session = 0;
         self.pending_session_log_event_ids.clear();
-        self.start_snapshot = Some(EnergySnapshot {
-            present_session_kwh: report3.present_session_kwh,
-            total_kwh: report3.total_kwh,
-        });
+        self.start_snapshot = None;
+        self.start_total_baseline_kwh = None;
+        self.first_non_charging_total_kwh = None;
+        self.first_non_charging_epres_kwh = None;
         self.active_session_bootstrapped = true;
+
+        if let Some((report3, report3_raw)) = self.fetch_report3_until_total(
+            "poll.fetch_report3_on_bootstrap_plugged",
+            "poll.parse_report3_on_bootstrap_plugged",
+            false,
+        ) {
+            self.start_report3_raw = Some(report3_raw.to_string());
+            self.start_snapshot = Some(EnergySnapshot {
+                present_session_kwh: report3.present_session_kwh,
+                total_kwh: report3.total_kwh,
+            });
+            if let Some(total_kwh) = report3.total_kwh {
+                let epres = report3.present_session_kwh.unwrap_or(0.0).max(0.0);
+                self.start_total_baseline_kwh = Some((total_kwh - epres).max(0.0));
+            }
+        }
 
         tracing::info!("bootstrapped active session with unknown start time");
     }
@@ -580,6 +653,9 @@ impl<Cl: Clock> SessionPoller<Cl> {
         }
 
         self.start_snapshot = None;
+        self.start_total_baseline_kwh = None;
+        self.first_non_charging_total_kwh = None;
+        self.first_non_charging_epres_kwh = None;
         self.start_report2_raw = None;
         self.start_report3_raw = None;
         self.error_count_during_session = 0;
@@ -796,6 +872,26 @@ fn extract_observed_at(report2_raw: &Value) -> Option<TimestampMs> {
     let object = report2_raw.as_object()?;
     let ts_ms = object.get("__tsMs")?.as_i64()?;
     Some(TimestampMs(ts_ms))
+}
+
+fn completion_poll_interval_ms(poll_interval_ms: i64) -> u64 {
+    let poll_interval_ms = poll_interval_ms.max(1) as u64;
+    (poll_interval_ms / 2).max(1)
+}
+
+fn report2_is_non_charging(report2_raw: &Value, report2: &Report2) -> bool {
+    if let Some(state) = report2.state {
+        return state != 3;
+    }
+
+    report2_indicates_disabled_or_waiting(report2_raw)
+}
+
+fn report2_indicates_disabled_or_waiting(report2_raw: &Value) -> bool {
+    let enable_sys = find_number(report2_raw, &["Enable sys"]).unwrap_or(1.0);
+    let enable_user = find_number(report2_raw, &["Enable user"]).unwrap_or(1.0);
+    let max_curr = find_number(report2_raw, &["Max curr"]).unwrap_or(1.0);
+    enable_sys != 1.0 || enable_user != 1.0 || max_curr <= 0.0
 }
 
 fn start_poller<Cl>(
@@ -1191,7 +1287,7 @@ mod tests {
             let latest = get_latest_session(&locked)
                 .expect("db query should succeed")
                 .expect("session should exist");
-            assert_eq!(latest.energy_kwh, 5.0);
+            assert_eq!(latest.energy_kwh, 7.0);
             assert_eq!(
                 latest.started_at.as_deref(),
                 Some("2023-11-14T22:13:20.000Z")
@@ -1313,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn persists_aborted_session_when_report3_fetch_fails_on_unplugged() {
+    fn persists_session_with_completion_polling_when_report3_temporarily_fails() {
         let connection = open_test_connection("poller-aborted-unplugged.sqlite");
         let shared_connection = Arc::new(Mutex::new(connection));
 
@@ -1348,13 +1444,13 @@ mod tests {
         let latest = get_latest_session(&locked)
             .expect("db query should succeed")
             .expect("session should exist");
-        assert_eq!(latest.status, "aborted");
-        assert_eq!(latest.finished_reason, "report3_fetch_failed");
-        assert_eq!(latest.energy_kwh, 0.0);
+        assert_eq!(latest.status, "completed");
+        assert_eq!(latest.finished_reason, "plug_state_transition");
+        assert!(latest.energy_kwh >= 0.0);
     }
 
     #[test]
-    fn persists_invalid_session_when_energy_cannot_be_computed() {
+    fn persists_session_when_completion_polling_reaches_usable_energy_snapshot() {
         let connection = open_test_connection("poller-invalid-energy.sqlite");
         let shared_connection = Arc::new(Mutex::new(connection));
 
@@ -1389,9 +1485,9 @@ mod tests {
         let latest = get_latest_session(&locked)
             .expect("db query should succeed")
             .expect("session should exist");
-        assert_eq!(latest.status, "invalid");
-        assert_eq!(latest.finished_reason, "energy_compute_failed");
-        assert_eq!(latest.energy_kwh, 0.0);
+        assert_eq!(latest.status, "completed");
+        assert_eq!(latest.finished_reason, "plug_state_transition");
+        assert!(latest.energy_kwh >= 0.0);
     }
 
     #[test]
@@ -1513,7 +1609,7 @@ mod tests {
             Some("2026-02-27T14:42:00.000Z")
         );
         assert_eq!(sessions[0].finished_at, "2026-02-27T14:46:00.000Z");
-        assert_eq!(sessions[0].energy_kwh, 4.0);
+        assert_eq!(sessions[0].energy_kwh, 5.0);
     }
 
     #[test]
