@@ -17,6 +17,7 @@ use crate::app::error::AppError;
 use crate::app::services::{SessionCommandHandler, SqliteSessionService};
 use crate::domain::keba_payload::{ParseError, parse_report2};
 use crate::domain::models::NewUnplugLogRecord;
+use crate::domain::session_state::{SessionStateMachine, SessionTransition, TimestampMs};
 
 #[derive(Debug, Error)]
 pub enum PollerError {
@@ -30,7 +31,8 @@ pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
     session_commands: SqliteSessionService,
     station_label: String,
-    last_plugged: Option<bool>,
+    state_machine: SessionStateMachine,
+    consecutive_poll_errors: u32,
 }
 
 impl PlugStatusPoller {
@@ -38,31 +40,52 @@ impl PlugStatusPoller {
         client: Box<dyn KebaClient>,
         session_commands: SqliteSessionService,
         station_label: String,
+        debounce_samples: usize,
     ) -> Self {
         Self {
             client,
             session_commands,
             station_label,
-            last_plugged: None,
+            state_machine: SessionStateMachine::new(debounce_samples),
+            consecutive_poll_errors: 0,
         }
     }
 
     pub fn tick(&mut self) -> Result<(), PollerError> {
         let report2_raw = self.client.get_report2().map_err(PollerError::FetchReport2)?;
         let report2 = parse_report2(&report2_raw).map_err(PollerError::ParseReport2)?;
-
-        if let Some(previous) = self.last_plugged
-            && previous != report2.plugged
-        {
-            self.log_status_change(report2.plugged);
+        if self.consecutive_poll_errors > 0 {
+            tracing::info!(
+                consecutive_errors = self.consecutive_poll_errors,
+                "poller recovered after consecutive errors"
+            );
+            self.consecutive_poll_errors = 0;
         }
 
-        self.last_plugged = Some(report2.plugged);
+        let observed_at = TimestampMs(Utc::now().timestamp_millis());
+        if let Some(transition) = self.state_machine.observe_at(report2.plugged, observed_at) {
+            match transition {
+                SessionTransition::Plugged { .. } => self.log_status_change(true),
+                SessionTransition::Unplugged { .. } => self.log_status_change(false),
+            }
+        }
+
         Ok(())
     }
 
-    pub fn note_poll_error(&mut self, _error: &PollerError) {
-        // Intentionally no default error logging: only status transitions are logged.
+    pub fn note_poll_error(&mut self, error: &PollerError) {
+        self.consecutive_poll_errors += 1;
+        if self.consecutive_poll_errors == 1 {
+            tracing::warn!(error = %error, "poller tick failed");
+            return;
+        }
+        if self.consecutive_poll_errors.is_multiple_of(10) {
+            tracing::warn!(
+                error = %error,
+                consecutive_errors = self.consecutive_poll_errors,
+                "poller tick still failing"
+            );
+        }
     }
 
     fn log_status_change(&self, plugged: bool) {
@@ -99,7 +122,9 @@ impl PlugStatusPoller {
             kwh: details.kwh,
             card_id: details.card_id,
         };
-        let _ = self.session_commands.insert_unplug_log_event(&event);
+        if let Err(error) = self.session_commands.insert_unplug_log_event(&event) {
+            tracing::warn!(error = %error, "failed to persist unplug log event");
+        }
     }
 
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
@@ -349,6 +374,7 @@ fn build_poller(
         keba_client,
         session_service,
         station_label(config.station_id.as_deref()),
+        config.debounce_samples,
     ))
 }
 
@@ -458,5 +484,166 @@ fn run_http_server(http_bind: &str, api_state: ApiState) -> Result<(), AppError>
         .await
     });
     server_result.map_err(AppError::runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use super::PlugStatusPoller;
+    use crate::adapters::keba_udp::{KebaClient, KebaClientError};
+    use crate::app::services::SqliteSessionService;
+    use crate::test_support::open_test_connection;
+
+    struct FakeKebaClient {
+        report2_payloads: Mutex<VecDeque<serde_json::Value>>,
+        report3_payloads: Mutex<VecDeque<serde_json::Value>>,
+    }
+
+    impl FakeKebaClient {
+        fn new(report2_payloads: Vec<serde_json::Value>, report3_payloads: Vec<serde_json::Value>) -> Self {
+            Self {
+                report2_payloads: Mutex::new(VecDeque::from(report2_payloads)),
+                report3_payloads: Mutex::new(VecDeque::from(report3_payloads)),
+            }
+        }
+    }
+
+    impl KebaClient for FakeKebaClient {
+        fn get_report2(&self) -> Result<serde_json::Value, KebaClientError> {
+            self.report2_payloads
+                .lock()
+                .expect("report2 queue lock should be available")
+                .pop_front()
+                .ok_or_else(|| {
+                    KebaClientError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "no further report2 payloads",
+                    ))
+                })
+        }
+
+        fn get_report3(&self) -> Result<serde_json::Value, KebaClientError> {
+            self.report3_payloads
+                .lock()
+                .expect("report3 queue lock should be available")
+                .pop_front()
+                .ok_or_else(|| {
+                    KebaClientError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "no further report3 payloads",
+                    ))
+                })
+        }
+
+        fn get_report100(&self) -> Result<serde_json::Value, KebaClientError> {
+            Err(KebaClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "not needed in test",
+            )))
+        }
+
+        fn get_report101(&self) -> Result<serde_json::Value, KebaClientError> {
+            Err(KebaClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "not needed in test",
+            )))
+        }
+    }
+
+    #[test]
+    fn unplug_transition_persists_unplug_event_only() {
+        let connection = Arc::new(Mutex::new(open_test_connection("runtime-session-persist")));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+            ],
+            vec![
+                json!({"Energy (present session)": 0.0, "Energy (total)": 10.0}),
+                json!({"Energy (present session)": 7.2, "Energy (total)": 17.2}),
+            ],
+        );
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service.clone(),
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..8 {
+            poller.tick().expect("pre-unplug ticks should succeed");
+        }
+        {
+            let db = connection.lock().expect("connection lock should be available");
+            let unplug_count: i64 = db
+                .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+                .expect("unplug count query should succeed");
+            assert_eq!(unplug_count, 0);
+        }
+        poller.tick().expect("debounced unplug tick should succeed");
+
+        let db = connection.lock().expect("connection lock should be available");
+        let unplug_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .expect("unplug count query should succeed");
+        let session_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM charging_sessions", [], |row| row.get(0))
+            .expect("session count query should succeed");
+
+        assert_eq!(unplug_count, 1);
+        assert_eq!(session_count, 0);
+    }
+
+    #[test]
+    fn flapping_state_does_not_persist_unplug_event() {
+        let connection = Arc::new(Mutex::new(open_test_connection("runtime-session-flap")));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+            ],
+            vec![],
+        );
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..9 {
+            poller.tick().expect("flapping tick should succeed");
+        }
+
+        let db = connection.lock().expect("connection lock should be available");
+        let unplug_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .expect("unplug count query should succeed");
+        assert_eq!(unplug_count, 0);
+    }
 }
 

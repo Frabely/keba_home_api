@@ -68,7 +68,7 @@
     - `POLL_INTERVAL_MS` (default 3000)
     - `DB_PATH` (z. B. `/var/lib/keba/keba.db`)
     - `HTTP_BIND` (z. B. `0.0.0.0:8080`)
-    - Optional: `DEBOUNCE_SAMPLES` (default 2)
+    - Optional: `DEBOUNCE_SAMPLES` (default 3)
     - Optional: mögliche Key-Namen:
         - Status/Plug: `Plug`, `State` etc.
         - Seconds: `Seconds`, `Sec`, `seconds`
@@ -161,5 +161,5 @@
 6. v1 ohne Auth im Heimnetz, aber mit vorbereitetem Auth-Extension-Point.
 7. Deployment v1: Raspberry Pi + systemd; Docker später optional.
 8. Defaults übernehmen: `DB_PATH=/var/lib/keba/keba.db`, `HTTP_BIND=0.0.0.0:8080`.
-9. Debounce-Default: `2` (konfigurierbar).
+9. Debounce-Default: `3` (konfigurierbar).
 10. Kein Dev-Simulationsendpoint in v1-Prodpfad; optional später hinter Feature-Flag.

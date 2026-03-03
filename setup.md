@@ -299,6 +299,8 @@ sudo systemctl start keba-home-api-reader
 3. Keine neuen Sessions in API:
 - Writer-Logs der betroffenen Station pruefen.
 - IP/Port/KEBA-Erreichbarkeit pruefen.
+- Auf `poller tick failed` Warnungen achten (zeigen Fetch/Parse-Probleme von `report 2` direkt im Log). Wiederholte Fehler werden gebuendelt, damit Zustandswechsel-Logs sichtbar bleiben.
+- `unplug_log_events`-Insert passiert beim debouncten Uebergang `Plug true -> false` (Abstecken). Der Wechsel wird erst nach `DEBOUNCE_SAMPLES` gleichen Polls (Default `3`) bestaetigt; ohne bestaetigten Zustandswechsel wird kein neuer Unplug-Eintrag angelegt.
 
 4. Session mit `startedAt: null`:
 - Erwartetes Verhalten, wenn der Service waehrend einer bereits laufenden/angesteckten Session gestartet wurde.
