@@ -160,7 +160,7 @@ impl PlugStatusPoller {
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
         for attempt in 1..=UNPLUG_DETAILS_RETRY_ATTEMPTS {
             let details = self.fetch_unplug_details_once(disconnected_at_ms);
-            if details.is_complete() {
+            if details.is_complete() || details.is_zero_kwh() {
                 if attempt > 1 {
                     tracing::info!(
                         attempt,
@@ -189,6 +189,7 @@ impl PlugStatusPoller {
     fn fetch_unplug_details_once(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
         const REPORT_SEARCH_START: u16 = 100;
         const REPORT_SEARCH_END: u16 = 130;
+        let mut zero_kwh_fallback: Option<UnplugLogDetails> = None;
 
         for report_id in REPORT_SEARCH_START..=REPORT_SEARCH_END {
             let payload = match self.client.get_report(report_id) {
@@ -212,9 +213,12 @@ impl PlugStatusPoller {
             if details.is_complete() {
                 return details;
             }
+            if zero_kwh_fallback.is_none() && details.is_zero_kwh() {
+                zero_kwh_fallback = Some(details);
+            }
         }
 
-        UnplugLogDetails::na()
+        zero_kwh_fallback.unwrap_or_else(UnplugLogDetails::na)
     }
 }
 
@@ -237,6 +241,10 @@ impl UnplugLogDetails {
 
     fn is_complete(&self) -> bool {
         self.started != "n/a" && self.ended != "n/a" && self.kwh != "n/a"
+    }
+
+    fn is_zero_kwh(&self) -> bool {
+        self.kwh == "0.000"
     }
 }
 
@@ -301,6 +309,17 @@ fn extract_unplug_details_from_report(
             started: format_ts(started),
             ended: format_ts(ended),
             kwh: format!("{kwh:.3}"),
+            card_id,
+        };
+    }
+
+    if let Some(kwh) = kwh_value
+        && kwh == 0.0
+    {
+        return UnplugLogDetails {
+            started: "n/a".to_string(),
+            ended: "n/a".to_string(),
+            kwh: "0.000".to_string(),
             card_id,
         };
     }
@@ -940,6 +959,60 @@ mod tests {
 
         assert_eq!(row.2, "6.540");
         assert_eq!(row.3, "R101");
+    }
+
+    #[test]
+    fn unplug_transition_persists_zero_kwh_when_only_zero_session_energy_is_available() {
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-unplug-report-1xx-zero-fallback",
+        )));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+            ],
+            vec![],
+        )
+        .with_1xx_reports(vec![(
+            100,
+            json!({"E Pres": 0.0, "ended[s]": 0, "RFID tag": "RZERO"}),
+        )]);
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..9 {
+            poller.tick().expect("poll tick should succeed");
+        }
+
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
+        let row: (String, String, String, String) = db
+            .query_row(
+                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("inserted unplug event should be readable");
+
+        assert_eq!(row.0, "n/a");
+        assert_eq!(row.1, "n/a");
+        assert_eq!(row.2, "0.000");
+        assert_eq!(row.3, "RZERO");
     }
 
     #[test]
