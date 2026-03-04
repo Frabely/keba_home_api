@@ -19,7 +19,8 @@ Response `200`:
 ```
 
 ## `GET /sessions/carport/latest`
-Fetch latest session view from KEBA `report 100` (fallback to `report 101` if `ended` in `report 100` is `0`).
+Fetch latest session view from KEBA `report 100..130`.  
+The API takes the first report where `started > 0`, `ended > 0` and `E Pres > 0`.
 
 Example:
 ```bash
@@ -29,6 +30,7 @@ curl -s http://localhost:8080/sessions/carport/latest | jq
 Response `200`:
 ```json
 {
+  "reportId": 103,
   "kWh": 7.65,
   "started": 1772386819000,
   "ended": 1772427719000,
@@ -66,6 +68,6 @@ or
 
 ```json
 {
-  "error": "report 100/101 payload does not contain valid started/ended timestamps"
+  "error": "reports 100-130 do not contain started/end timestamps and E Pres > 0"
 }
 ```

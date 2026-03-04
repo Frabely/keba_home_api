@@ -19,6 +19,8 @@ pub struct Report100Station {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct LatestStationSessionResponse {
+    #[serde(rename = "reportId")]
+    pub report_id: u16,
     #[serde(rename = "kWh")]
     pub kwh: f64,
     pub started: Option<i64>,
@@ -96,6 +98,7 @@ fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpRespon
         let view = extract_latest_station_session_view(object, now_ms);
         if has_complete_session_data(&view) {
             return HttpResponse::Ok().json(LatestStationSessionResponse {
+                report_id,
                 kwh: view.kwh.unwrap_or(0.0),
                 started: view.started,
                 ended: view.ended,
@@ -347,6 +350,7 @@ mod tests {
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
         assert_eq!(json["kWh"], 12.34);
+        assert_eq!(json["reportId"], 100);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
         assert_eq!(json["CardId"], "ABC123");
@@ -444,6 +448,7 @@ mod tests {
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
         assert_eq!(json["kWh"], 7.65);
+        assert_eq!(json["reportId"], 101);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
         assert_eq!(json["CardId"], "XYZ999");
@@ -542,6 +547,7 @@ mod tests {
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
         assert_eq!(json["kWh"], 6.54);
+        assert_eq!(json["reportId"], 103);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
         assert_eq!(json["CardId"], "R103");
@@ -639,6 +645,7 @@ mod tests {
         assert!(started >= expected_started_min && started <= expected_started_max);
         assert!(ended >= expected_ended_min && ended <= expected_ended_max);
         assert_eq!(json["kWh"], 4.2);
+        assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "REL1");
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
