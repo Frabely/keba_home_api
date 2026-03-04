@@ -72,5 +72,5 @@ or
 }
 ```
 Hinweis zu `kWh`:
-- `E Pres` Werte `>= 1000` werden als Wh interpretiert und in kWh umgerechnet (`/1000`).
+- `E Pres` Werte `>= 1000` werden als `0.1 Wh` interpretiert und in kWh umgerechnet (`/10000`).
 - Kleinere Werte werden als bereits in kWh geliefert behandelt.

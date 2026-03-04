@@ -287,7 +287,7 @@ fn parse_f64(value: &Value) -> Option<f64> {
 
 fn normalize_session_kwh(raw_energy: f64) -> f64 {
     if raw_energy >= 1000.0 {
-        raw_energy / 1000.0
+        raw_energy / 10_000.0
     } else {
         raw_energy
     }

@@ -191,7 +191,7 @@ fn extract_latest_station_session_view(
 
 fn normalize_session_kwh(raw_energy: f64) -> f64 {
     if raw_energy >= 1000.0 {
-        raw_energy / 1000.0
+        raw_energy / 10_000.0
     } else {
         raw_energy
     }
@@ -858,7 +858,7 @@ mod tests {
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["kWh"], 81.984);
+        assert_eq!(json["kWh"], 8.1984);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "WH1");
 
@@ -946,7 +946,7 @@ mod tests {
         let ended = json["ended"].as_i64().expect("ended should be i64");
         assert!(started >= expected_started_min && started <= expected_started_max);
         assert!(ended >= expected_ended_min && ended <= expected_ended_max);
-        assert_eq!(json["kWh"], 20.064);
+        assert_eq!(json["kWh"], 2.0064);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC1");
 
@@ -1017,7 +1017,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
         assert_eq!(json["started"], 1_772_546_661_000_i64);
         assert_eq!(json["ended"], 1_772_605_949_000_i64);
-        assert_eq!(json["kWh"], 81.984);
+        assert_eq!(json["kWh"], 8.1984);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC2");
 
