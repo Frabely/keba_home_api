@@ -54,6 +54,9 @@ async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> i
 }
 
 fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpResponse {
+    const REPORT_SEARCH_START: u16 = 100;
+    const REPORT_SEARCH_END: u16 = 130;
+
     let Some(station) = state
         .report100_stations
         .iter()
@@ -73,76 +76,43 @@ fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpRespon
         }
     };
 
-    let report100 = match client.get_report100() {
-        Ok(payload) => payload,
-        Err(error) => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("failed to fetch report 100: {error}")
-            }));
-        }
-    };
-
-    let object = match report100.as_object() {
-        Some(object) => object,
-        None => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": "report 100 payload must be a json object"
-            }));
-        }
-    };
-
     let now_ms = Utc::now().timestamp_millis();
-    let ended_is_zero_in_report100 = find_value_from_object(
-        object,
-        &["ended", "Ended", "end", "session_end", "Session End"],
-    )
-    .and_then(parse_number)
-    .map(|value| value == 0.0)
-    .unwrap_or(false);
+    let mut last_fetch_error: Option<String> = None;
 
-    let report100_view = extract_latest_station_session_view(object, now_ms);
-    let effective_view = if ended_is_zero_in_report100 {
-        let report101 = match client.get_report101() {
+    for report_id in REPORT_SEARCH_START..=REPORT_SEARCH_END {
+        let payload = match client.get_report(report_id) {
             Ok(payload) => payload,
             Err(error) => {
-                return HttpResponse::BadGateway().json(serde_json::json!({
-                    "error": format!("failed to fetch report 101: {error}")
-                }));
+                last_fetch_error = Some(format!("report {report_id}: {error}"));
+                continue;
             }
         };
-        let object101 = match report101.as_object() {
-            Some(object) => object,
-            None => {
-                return HttpResponse::BadGateway().json(serde_json::json!({
-                    "error": "report 101 payload must be a json object"
-                }));
-            }
+
+        let Some(object) = payload.as_object() else {
+            last_fetch_error = Some(format!("report {report_id}: payload must be a json object"));
+            continue;
         };
-        extract_latest_station_session_view(object101, now_ms)
-    } else {
-        report100_view
-    };
 
-    if effective_view.started.is_none()
-        || effective_view.ended.is_none()
-        || effective_view.ended.unwrap_or(0) <= 0
-    {
-        return HttpResponse::BadGateway().json(serde_json::json!({
-            "error": "report 100/101 payload does not contain valid started/ended timestamps"
-        }));
-    }
-    if effective_view.kwh.is_none() {
-        return HttpResponse::BadGateway().json(serde_json::json!({
-            "error": "report 100/101 payload does not contain a numeric E Pres value"
-        }));
+        let view = extract_latest_station_session_view(object, now_ms);
+        if has_complete_session_data(&view) {
+            return HttpResponse::Ok().json(LatestStationSessionResponse {
+                kwh: view.kwh.unwrap_or(0.0),
+                started: view.started,
+                ended: view.ended,
+                card_id: view.card_id,
+            });
+        }
     }
 
-    HttpResponse::Ok().json(LatestStationSessionResponse {
-        kwh: effective_view.kwh.unwrap_or(0.0),
-        started: effective_view.started,
-        ended: effective_view.ended,
-        card_id: effective_view.card_id,
-    })
+    let mut error_message =
+        "reports 100-130 do not contain started/end timestamps and E Pres > 0".to_string();
+    if let Some(fetch_error) = last_fetch_error {
+        error_message.push_str(&format!(" (last error: {fetch_error})"));
+    }
+
+    HttpResponse::BadGateway().json(serde_json::json!({
+        "error": error_message
+    }))
 }
 
 struct LatestStationSessionView {
@@ -150,6 +120,12 @@ struct LatestStationSessionView {
     started: Option<i64>,
     ended: Option<i64>,
     card_id: Value,
+}
+
+fn has_complete_session_data(view: &LatestStationSessionView) -> bool {
+    matches!(view.started, Some(started) if started > 0)
+        && matches!(view.ended, Some(ended) if ended > 0)
+        && matches!(view.kwh, Some(kwh) if kwh > 0.0)
 }
 
 fn extract_latest_station_session_view(
@@ -168,7 +144,13 @@ fn extract_latest_station_session_view(
     );
     let started = find_value_from_object(
         object,
-        &["started", "Started", "start", "session_start", "Session Start"],
+        &[
+            "started",
+            "Started",
+            "start",
+            "session_start",
+            "Session Start",
+        ],
     )
     .and_then(|value| parse_session_timestamp_ms(value, now_ms, sec_from_report));
     let ended = find_value_from_object(
@@ -179,12 +161,7 @@ fn extract_latest_station_session_view(
     let card_id = find_value_from_object(
         object,
         &[
-            "RFID",
-            "RFID tag",
-            "RFID Tag",
-            "CardId",
-            "Card ID",
-            "card_id",
+            "RFID", "RFID tag", "RFID Tag", "CardId", "Card ID", "card_id",
         ],
     )
     .cloned()
@@ -207,7 +184,8 @@ fn find_value_from_object<'a>(
             return Some(value);
         }
     }
-    let normalized_aliases: Vec<String> = aliases.iter().map(|alias| normalize_key(alias)).collect();
+    let normalized_aliases: Vec<String> =
+        aliases.iter().map(|alias| normalize_key(alias)).collect();
     object.iter().find_map(|(key, value)| {
         let normalized_key = normalize_key(key);
         if normalized_aliases
@@ -221,7 +199,10 @@ fn find_value_from_object<'a>(
     })
 }
 
-fn find_number_from_object(object: &serde_json::Map<String, Value>, aliases: &[&str]) -> Option<f64> {
+fn find_number_from_object(
+    object: &serde_json::Map<String, Value>,
+    aliases: &[&str],
+) -> Option<f64> {
     find_value_from_object(object, aliases).and_then(parse_number)
 }
 
@@ -249,7 +230,11 @@ fn parse_absolute_timestamp_ms(value: &Value) -> Option<i64> {
     }
 }
 
-fn parse_session_timestamp_ms(value: &Value, now_ms: i64, sec_from_report100: Option<f64>) -> Option<i64> {
+fn parse_session_timestamp_ms(
+    value: &Value,
+    now_ms: i64,
+    sec_from_report100: Option<f64>,
+) -> Option<i64> {
     if let Some(sec_now) = sec_from_report100
         && let Some(raw_seconds) = parse_number(value)
         && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
@@ -272,6 +257,7 @@ fn normalize_key(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::net::UdpSocket;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -357,8 +343,9 @@ mod tests {
         let expected_started =
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
                 .expect("timestamp should parse");
-        let expected_ended = parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
-            .expect("timestamp should parse");
+        let expected_ended =
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+                .expect("timestamp should parse");
         assert_eq!(json["kWh"], 12.34);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
@@ -453,12 +440,120 @@ mod tests {
         let expected_started =
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
                 .expect("timestamp should parse");
-        let expected_ended = parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
-            .expect("timestamp should parse");
+        let expected_ended =
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+                .expect("timestamp should parse");
         assert_eq!(json["kWh"], 7.65);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
         assert_eq!(json["CardId"], "XYZ999");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_checks_reports_until_valid_payload_is_found() {
+        let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_commands_responder = Arc::clone(&seen_commands);
+
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+
+                seen_commands_responder
+                    .lock()
+                    .expect("command log mutex should be lockable")
+                    .push(cmd.clone());
+
+                let payload = match cmd.as_str() {
+                    "report 100" => {
+                        r#"{"E Pres":4.2,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"R100"}"#
+                    }
+                    "report 101" => {
+                        r#"{"E Pres":0,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"R101"}"#
+                    }
+                    "report 102" => {
+                        r#"{"E Pres":1.23,"started":null,"ended":"2026-03-02 04:01:59.000","RFID tag":"R102"}"#
+                    }
+                    "report 103" => {
+                        r#"{"E Pres":6.54,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"R103"}"#
+                    }
+                    _ => continue,
+                };
+
+                responder
+                    .send_to(payload.as_bytes(), from)
+                    .expect("responder send should succeed");
+            }
+        });
+
+        let mut state = empty_state();
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        let expected_started =
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-01 16:40:19.000"))
+                .expect("timestamp should parse");
+        let expected_ended =
+            parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
+                .expect("timestamp should parse");
+        assert_eq!(json["kWh"], 6.54);
+        assert_eq!(json["started"], expected_started);
+        assert_eq!(json["ended"], expected_ended);
+        assert_eq!(json["CardId"], "R103");
+
+        let commands = seen_commands
+            .lock()
+            .expect("command log mutex should be lockable")
+            .clone();
+        assert_eq!(
+            commands,
+            vec!["report 100", "report 101", "report 102", "report 103"]
+        );
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
         shutdown_socket
@@ -495,8 +590,7 @@ mod tests {
                     break;
                 }
                 if cmd == "report 100" {
-                    let payload =
-                        r#"{"E Pres":4.2,"Sec":"40000000","started":"26332000","ended":"35131000","RFID tag":"REL1"}"#;
+                    let payload = r#"{"E Pres":4.2,"Sec":"40000000","started":"26332000","ended":"35131000","RFID tag":"REL1"}"#;
                     responder
                         .send_to(payload.as_bytes(), from)
                         .expect("responder send should succeed");
@@ -533,8 +627,10 @@ mod tests {
         let sec_now = 40_000_000.0_f64;
         let started_raw = 26_332_000.0_f64;
         let ended_raw = 35_131_000.0_f64;
-        let expected_started_min = (now_before as f64 - (sec_now - started_raw) * 1000.0) as i64 - 2000;
-        let expected_started_max = (now_after as f64 - (sec_now - started_raw) * 1000.0) as i64 + 2000;
+        let expected_started_min =
+            (now_before as f64 - (sec_now - started_raw) * 1000.0) as i64 - 2000;
+        let expected_started_max =
+            (now_after as f64 - (sec_now - started_raw) * 1000.0) as i64 + 2000;
         let expected_ended_min = (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
         let expected_ended_max = (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
 

@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -54,7 +57,10 @@ impl PlugStatusPoller {
     }
 
     pub fn tick(&mut self) -> Result<(), PollerError> {
-        let report2_raw = self.client.get_report2().map_err(PollerError::FetchReport2)?;
+        let report2_raw = self
+            .client
+            .get_report2()
+            .map_err(PollerError::FetchReport2)?;
         let report2 = parse_report2(&report2_raw).map_err(PollerError::ParseReport2)?;
         if self.consecutive_poll_errors > 0 {
             tracing::info!(
@@ -136,73 +142,34 @@ impl PlugStatusPoller {
     }
 
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
-        let report100 = match self.client.get_report100() {
-            Ok(payload) => payload,
-            Err(_) => return UnplugLogDetails::na(),
-        };
-        let object100 = match report100.as_object() {
-            Some(object) => object,
-            None => return UnplugLogDetails::na(),
-        };
-        let ended_100 = find_value(object100, &["ended", "Ended"]).and_then(parse_f64);
-        let selected_payload = if matches!(
-            ended_100,
-            Some(0.0)
-        ) {
-            match self.client.get_report101() {
+        const REPORT_SEARCH_START: u16 = 100;
+        const REPORT_SEARCH_END: u16 = 130;
+
+        for report_id in REPORT_SEARCH_START..=REPORT_SEARCH_END {
+            let payload = match self.client.get_report(report_id) {
                 Ok(payload) => payload,
-                Err(_) => return UnplugLogDetails::na(),
+                Err(error) => {
+                    tracing::debug!(
+                        report_id,
+                        error = %error,
+                        "failed to fetch report while resolving unplug details"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(object) = payload.as_object() else {
+                tracing::debug!(report_id, "report payload is not a JSON object");
+                continue;
+            };
+
+            let details = extract_unplug_details_from_report(object, disconnected_at_ms);
+            if details.is_complete() {
+                return details;
             }
-        } else {
-            report100
-        };
-        let selected = match selected_payload.as_object() {
-            Some(object) => object,
-            None => return UnplugLogDetails::na(),
-        };
-
-        let kwh = find_value(
-            selected,
-            &["E Pres", "E pres", "Energy Session", "energy_present_session"],
-        )
-        .and_then(parse_f64)
-        .map(|value| format!("{value:.3}"))
-        .unwrap_or_else(|| "n/a".to_string());
-        let card_id = find_value(
-            selected,
-            &[
-                "RFID",
-                "RFID tag",
-                "RFID Tag",
-                "CardId",
-                "Card ID",
-                "card_id",
-            ],
-        )
-        .map(stringify_value)
-        .unwrap_or_else(|| "n/a".to_string());
-
-        let started = parse_session_timestamp_ms_from_object(
-            selected,
-            &["started", "Started", "start", "session_start", "Session Start"],
-            disconnected_at_ms,
-        )
-        .map(format_ts)
-        .unwrap_or_else(|| "n/a".to_string());
-        let ended = parse_session_timestamp_ms_from_object(
-            selected,
-            &["ended", "Ended", "end", "session_end", "Session End"],
-            disconnected_at_ms,
-        )
-        .map(format_ts)
-        .unwrap_or_else(|| "n/a".to_string());
-
-        UnplugLogDetails {
-            started,
-            ended,
-            kwh,
-            card_id,
         }
+
+        UnplugLogDetails::na()
     }
 }
 
@@ -222,6 +189,67 @@ impl UnplugLogDetails {
             card_id: "n/a".to_string(),
         }
     }
+
+    fn is_complete(&self) -> bool {
+        self.started != "n/a" && self.ended != "n/a" && self.kwh != "n/a"
+    }
+}
+
+fn extract_unplug_details_from_report(
+    report: &serde_json::Map<String, Value>,
+    disconnected_at_ms: i64,
+) -> UnplugLogDetails {
+    let kwh_value = find_value(
+        report,
+        &[
+            "E Pres",
+            "E pres",
+            "Energy Session",
+            "energy_present_session",
+        ],
+    )
+    .and_then(parse_f64);
+
+    let started_ms = parse_session_timestamp_ms_from_object(
+        report,
+        &[
+            "started",
+            "Started",
+            "start",
+            "session_start",
+            "Session Start",
+        ],
+        disconnected_at_ms,
+    );
+    let ended_ms = parse_session_timestamp_ms_from_object(
+        report,
+        &["ended", "Ended", "end", "session_end", "Session End"],
+        disconnected_at_ms,
+    );
+
+    let card_id = find_value(
+        report,
+        &[
+            "RFID", "RFID tag", "RFID Tag", "CardId", "Card ID", "card_id",
+        ],
+    )
+    .map(stringify_value)
+    .unwrap_or_else(|| "n/a".to_string());
+
+    if let (Some(started), Some(ended), Some(kwh)) = (started_ms, ended_ms, kwh_value)
+        && started > 0
+        && ended > 0
+        && kwh > 0.0
+    {
+        return UnplugLogDetails {
+            started: format_ts(started),
+            ended: format_ts(ended),
+            kwh: format!("{kwh:.3}"),
+            card_id,
+        };
+    }
+
+    UnplugLogDetails::na()
 }
 
 fn format_ts(value_ms: i64) -> String {
@@ -231,7 +259,10 @@ fn format_ts(value_ms: i64) -> String {
     }
 }
 
-fn find_value<'a>(object: &'a serde_json::Map<String, Value>, aliases: &[&str]) -> Option<&'a Value> {
+fn find_value<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    aliases: &[&str],
+) -> Option<&'a Value> {
     aliases.iter().find_map(|alias| object.get(*alias))
 }
 
@@ -271,7 +302,8 @@ fn parse_session_timestamp_ms_from_object(
     aliases: &[&str],
     now_ms: i64,
 ) -> Option<i64> {
-    let sec_from_report = find_value(object, &["Sec", "sec", "Seconds", "seconds"]).and_then(parse_f64);
+    let sec_from_report =
+        find_value(object, &["Sec", "sec", "Seconds", "seconds"]).and_then(parse_f64);
     let value = find_value(object, aliases)?;
     if let Some(sec_now) = sec_from_report
         && let Some(raw_seconds) = parse_f64(value)
@@ -405,7 +437,9 @@ fn build_report100_stations(config: &AppConfig) -> Vec<Report100Station> {
             None
         };
         if let Some(logical_name) = logical_name
-            && !mapped.iter().any(|entry: &Report100Station| entry.logical_name == logical_name)
+            && !mapped
+                .iter()
+                .any(|entry: &Report100Station| entry.logical_name == logical_name)
         {
             mapped.push(Report100Station {
                 logical_name: logical_name.to_string(),
@@ -444,7 +478,10 @@ fn build_keba_client(config: &AppConfig) -> Result<Box<dyn KebaClient>, AppError
     Ok(keba_client)
 }
 
-fn run_debug_replay_loop(poller: &mut PlugStatusPoller, poll_interval_ms: u64) -> Result<(), AppError> {
+fn run_debug_replay_loop(
+    poller: &mut PlugStatusPoller,
+    poll_interval_ms: u64,
+) -> Result<(), AppError> {
     loop {
         match poller.tick() {
             Ok(()) => std::thread::sleep(Duration::from_millis(poll_interval_ms)),
@@ -479,7 +516,7 @@ fn run_http_server(http_bind: &str, api_state: ApiState) -> Result<(), AppError>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;
@@ -493,14 +530,24 @@ mod tests {
     struct FakeKebaClient {
         report2_payloads: Mutex<VecDeque<serde_json::Value>>,
         report3_payloads: Mutex<VecDeque<serde_json::Value>>,
+        report_1xx_payloads: HashMap<u16, serde_json::Value>,
     }
 
     impl FakeKebaClient {
-        fn new(report2_payloads: Vec<serde_json::Value>, report3_payloads: Vec<serde_json::Value>) -> Self {
+        fn new(
+            report2_payloads: Vec<serde_json::Value>,
+            report3_payloads: Vec<serde_json::Value>,
+        ) -> Self {
             Self {
                 report2_payloads: Mutex::new(VecDeque::from(report2_payloads)),
                 report3_payloads: Mutex::new(VecDeque::from(report3_payloads)),
+                report_1xx_payloads: HashMap::new(),
             }
+        }
+
+        fn with_1xx_reports(mut self, reports: Vec<(u16, serde_json::Value)>) -> Self {
+            self.report_1xx_payloads = reports.into_iter().collect();
+            self
         }
     }
 
@@ -532,17 +579,23 @@ mod tests {
         }
 
         fn get_report100(&self) -> Result<serde_json::Value, KebaClientError> {
-            Err(KebaClientError::Io(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "not needed in test",
-            )))
+            self.get_report(100)
         }
 
         fn get_report101(&self) -> Result<serde_json::Value, KebaClientError> {
-            Err(KebaClientError::Io(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "not needed in test",
-            )))
+            self.get_report(101)
+        }
+
+        fn get_report(&self, report_id: u16) -> Result<serde_json::Value, KebaClientError> {
+            self.report_1xx_payloads
+                .get(&report_id)
+                .cloned()
+                .ok_or_else(|| {
+                    KebaClientError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!("report {report_id} not available in FakeKebaClient"),
+                    ))
+                })
         }
     }
 
@@ -580,20 +633,99 @@ mod tests {
             poller.tick().expect("pre-unplug ticks should succeed");
         }
         {
-            let db = connection.lock().expect("connection lock should be available");
+            let db = connection
+                .lock()
+                .expect("connection lock should be available");
             let unplug_count: i64 = db
-                .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| {
+                    row.get(0)
+                })
                 .expect("unplug count query should succeed");
             assert_eq!(unplug_count, 0);
         }
         poller.tick().expect("debounced unplug tick should succeed");
 
-        let db = connection.lock().expect("connection lock should be available");
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
         let unplug_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| {
+                row.get(0)
+            })
             .expect("unplug count query should succeed");
 
         assert_eq!(unplug_count, 1);
+    }
+
+    #[test]
+    fn unplug_transition_uses_first_complete_report_1xx_payload_for_db_values() {
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-unplug-report-1xx",
+        )));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+            ],
+            vec![
+                json!({"Energy (present session)": 0.0, "Energy (total)": 10.0}),
+                json!({"Energy (present session)": 7.2, "Energy (total)": 17.2}),
+            ],
+        )
+        .with_1xx_reports(vec![
+            (
+                100,
+                json!({"E Pres": 4.2, "started": "2026-03-01 16:40:19.000", "ended": 0, "RFID tag": "R100"}),
+            ),
+            (
+                101,
+                json!({"E Pres": 0, "started": "2026-03-01 16:40:19.000", "ended": "2026-03-02 04:01:59.000", "RFID tag": "R101"}),
+            ),
+            (
+                102,
+                json!({"E Pres": 1.23, "started": null, "ended": "2026-03-02 04:01:59.000", "RFID tag": "R102"}),
+            ),
+            (
+                103,
+                json!({"E Pres": 6.54, "started": "2026-03-01 16:40:19.000", "ended": "2026-03-02 04:01:59.000", "RFID tag": "R103"}),
+            ),
+        ]);
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..9 {
+            poller.tick().expect("poll tick should succeed");
+        }
+
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
+        let row: (String, String, String, String) = db
+            .query_row(
+                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("inserted unplug event should be readable");
+
+        assert_eq!(row.0, "2026-03-01 16:40");
+        assert_eq!(row.1, "2026-03-02 04:01");
+        assert_eq!(row.2, "6.540");
+        assert_eq!(row.3, "R103");
     }
 
     #[test]
@@ -627,16 +759,22 @@ mod tests {
             poller.tick().expect("flapping tick should succeed");
         }
 
-        let db = connection.lock().expect("connection lock should be available");
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
         let unplug_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| {
+                row.get(0)
+            })
             .expect("unplug count query should succeed");
         assert_eq!(unplug_count, 0);
     }
 
     #[test]
     fn debug_replay_two_minutes_writes_three_unplug_events() {
-        let connection = Arc::new(Mutex::new(open_test_connection("runtime-debug-two-minutes")));
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-debug-two-minutes",
+        )));
         let session_service = SqliteSessionService::new(Arc::clone(&connection));
         let fixture_path = format!(
             "{}/testdata/debug/two_minutes_three_unplugs.json",
@@ -657,12 +795,14 @@ mod tests {
         super::run_debug_replay_loop(&mut poller, poll_interval_ms)
             .expect("debug replay should finish");
 
-        let db = connection.lock().expect("connection lock should be available");
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
         let unplug_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| {
+                row.get(0)
+            })
             .expect("unplug count query should succeed");
         assert_eq!(unplug_count, 3);
     }
-
 }
-

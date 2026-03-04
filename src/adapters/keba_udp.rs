@@ -14,6 +14,17 @@ pub trait KebaClient: Send + Sync + 'static {
     fn get_report3(&self) -> Result<Value, KebaClientError>;
     fn get_report100(&self) -> Result<Value, KebaClientError>;
     fn get_report101(&self) -> Result<Value, KebaClientError>;
+
+    fn get_report(&self, report_id: u16) -> Result<Value, KebaClientError> {
+        match report_id {
+            100 => self.get_report100(),
+            101 => self.get_report101(),
+            _ => Err(KebaClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("report {report_id} is not supported by this client"),
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -94,7 +105,11 @@ impl KebaUdpClient {
         )
     }
 
-    fn send_command_once(&self, socket: &UdpSocket, command: &str) -> Result<Value, KebaClientError> {
+    fn send_command_once(
+        &self,
+        socket: &UdpSocket,
+        command: &str,
+    ) -> Result<Value, KebaClientError> {
         let payload_with_crlf = format!("{command}\r\n");
         match self.send_payload(socket, payload_with_crlf.as_bytes()) {
             Ok(response) => Ok(response),
@@ -141,12 +156,16 @@ impl KebaUdpClient {
         }
     }
 
+    pub fn get_report(&self, report_id: u16) -> Result<Value, KebaClientError> {
+        self.send_command(&format!("report {report_id}"))
+    }
+
     pub fn get_report100(&self) -> Result<Value, KebaClientError> {
-        self.send_command("report 100")
+        self.get_report(100)
     }
 
     pub fn get_report101(&self) -> Result<Value, KebaClientError> {
-        self.send_command("report 101")
+        self.get_report(101)
     }
 }
 
@@ -160,19 +179,23 @@ impl KebaClient for KebaUdpClient {
     }
 
     fn get_report100(&self) -> Result<Value, KebaClientError> {
-        self.send_command("report 100")
+        self.get_report(100)
     }
 
     fn get_report101(&self) -> Result<Value, KebaClientError> {
-        self.send_command("report 101")
+        self.get_report(101)
+    }
+
+    fn get_report(&self, report_id: u16) -> Result<Value, KebaClientError> {
+        KebaUdpClient::get_report(self, report_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use std::net::UdpSocket;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
