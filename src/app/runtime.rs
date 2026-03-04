@@ -32,6 +32,12 @@ pub enum PollerError {
 
 const POLLER_WARN_AFTER_CONSECUTIVE_ERRORS: u32 = 3;
 
+#[cfg(not(test))]
+const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 6;
+#[cfg(test)]
+const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 1;
+const UNPLUG_DETAILS_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
 pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
     session_commands: SqliteSessionService,
@@ -71,11 +77,21 @@ impl PlugStatusPoller {
         }
 
         let observed_at = TimestampMs(Utc::now().timestamp_millis());
+        let stable_before = self.state_machine.stable_plugged();
         if let Some(transition) = self.state_machine.observe_at(report2.plugged, observed_at) {
             match transition {
                 SessionTransition::Plugged { .. } => self.log_status_change(true),
                 SessionTransition::Unplugged { .. } => self.log_status_change(false),
             }
+        }
+        if stable_before.is_none()
+            && let Some(initial_plugged) = self.state_machine.stable_plugged()
+        {
+            tracing::info!(
+                station = %self.station_label,
+                plugged = initial_plugged,
+                "initial plug state established"
+            );
         }
 
         Ok(())
@@ -142,6 +158,35 @@ impl PlugStatusPoller {
     }
 
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
+        for attempt in 1..=UNPLUG_DETAILS_RETRY_ATTEMPTS {
+            let details = self.fetch_unplug_details_once(disconnected_at_ms);
+            if details.is_complete() {
+                if attempt > 1 {
+                    tracing::info!(
+                        attempt,
+                        "resolved unplug details after retry"
+                    );
+                }
+                return details;
+            }
+
+            if attempt < UNPLUG_DETAILS_RETRY_ATTEMPTS {
+                tracing::debug!(
+                    attempt,
+                    "unplug details incomplete, retrying report 1xx scan"
+                );
+                std::thread::sleep(UNPLUG_DETAILS_RETRY_INTERVAL);
+            }
+        }
+
+        tracing::warn!(
+            retry_attempts = UNPLUG_DETAILS_RETRY_ATTEMPTS,
+            "unplug details remained incomplete after retries"
+        );
+        UnplugLogDetails::na()
+    }
+
+    fn fetch_unplug_details_once(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
         const REPORT_SEARCH_START: u16 = 100;
         const REPORT_SEARCH_END: u16 = 130;
 
@@ -668,9 +713,9 @@ mod tests {
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
@@ -717,6 +762,55 @@ mod tests {
     }
 
     #[test]
+    fn startup_with_vehicle_already_connected_still_persists_unplug_event() {
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-startup-plugged-unplug",
+        )));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 3}),
+                json!({"Plug": 3}),
+            ],
+            vec![],
+        )
+        .with_1xx_reports(vec![
+            (
+                100,
+                json!({"E Pres": 8.1159, "Sec": 197769, "started[s]": 191012, "ended[s]": 197682, "RFID tag": "BOOT1"}),
+            ),
+        ]);
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            2,
+        );
+
+        for _ in 0..4 {
+            poller.tick().expect("poll tick should succeed");
+        }
+
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
+        let row: (String, String) = db
+            .query_row(
+                "SELECT kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("inserted unplug event should be readable");
+
+        assert_eq!(row.0, "8.116");
+        assert_eq!(row.1, "BOOT1");
+    }
+
+    #[test]
     fn unplug_transition_uses_first_complete_report_1xx_payload_for_db_values() {
         let connection = Arc::new(Mutex::new(open_test_connection(
             "runtime-unplug-report-1xx",
@@ -728,9 +822,9 @@ mod tests {
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
@@ -799,9 +893,9 @@ mod tests {
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
@@ -858,11 +952,11 @@ mod tests {
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
-                json!({"Plug": 1}),
+                json!({"Plug": 7}),
                 json!({"Plug": 0}),
             ],
             vec![],

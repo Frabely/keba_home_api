@@ -49,7 +49,14 @@ impl SessionStateMachine {
         match self.stable_plugged {
             None => {
                 if self.accept_candidate_at(plugged_observation, TimestampMs(0)) {
+                    let initial_at = self
+                        .candidate
+                        .map(|candidate| candidate.first_observed_at)
+                        .unwrap_or(TimestampMs(0));
                     self.stable_plugged = Some(plugged_observation);
+                    if plugged_observation {
+                        self.active_session_started_at = Some(initial_at);
+                    }
                     self.candidate = None;
                 }
                 None
@@ -102,7 +109,14 @@ impl SessionStateMachine {
         match self.stable_plugged {
             None => {
                 if self.accept_candidate_at(plugged_observation, observed_at) {
+                    let initial_at = self
+                        .candidate
+                        .map(|candidate| candidate.first_observed_at)
+                        .unwrap_or(observed_at);
                     self.stable_plugged = Some(plugged_observation);
+                    if plugged_observation {
+                        self.active_session_started_at = Some(initial_at);
+                    }
                     self.candidate = None;
                 }
                 None
@@ -273,7 +287,7 @@ mod tests {
 
         assert_eq!(machine.observe(true, &clock), None);
         assert_eq!(machine.observe(true, &clock), None);
-        assert_eq!(machine.active_session_started_at(), None);
+        assert_eq!(machine.active_session_started_at(), Some(TimestampMs(0)));
     }
 
     #[test]
@@ -288,6 +302,15 @@ mod tests {
         assert_eq!(machine.observe(false, &clock), None);
         assert_eq!(machine.observe(true, &clock), None);
         assert_eq!(machine.observe(false, &clock), None);
+    }
+
+    #[test]
+    fn startup_in_plugged_state_via_observe_at_sets_initial_session_start() {
+        let mut machine = SessionStateMachine::new(2);
+
+        assert_eq!(machine.observe_at(true, TimestampMs(2_000)), None);
+        assert_eq!(machine.observe_at(true, TimestampMs(2_100)), None);
+        assert_eq!(machine.active_session_started_at(), Some(TimestampMs(2_000)));
     }
 
     #[test]

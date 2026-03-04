@@ -84,7 +84,7 @@ pub fn parse_report2(payload: &Value) -> Result<Report2, ParseError> {
     let object = payload.as_object().ok_or(ParseError::InvalidPayloadType)?;
 
     let plugged = find_number(object, PLUG_KEYS)
-        .map(|value| value > 0.0)
+        .map(plug_value_indicates_vehicle_connected)
         .or_else(|| find_number(object, STATE_KEYS).map(|value| value > 0.0))
         .ok_or(ParseError::MissingField("Plug|State"))?;
 
@@ -220,6 +220,16 @@ fn normalize_numeric_token(token: &str) -> Option<String> {
     Some(token.to_string())
 }
 
+fn plug_value_indicates_vehicle_connected(value: f64) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    if (0.0..2.0).contains(&value) {
+        return value > 0.0;
+    }
+    value >= 5.0
+}
+
 fn f64_to_non_negative_u64(value: f64) -> Option<u64> {
     if !value.is_finite() || value < 0.0 {
         return None;
@@ -252,6 +262,38 @@ mod tests {
             Report2 {
                 plugged: true,
                 seconds: Some(4_264_958),
+                state: None,
+            }
+        );
+    }
+
+    #[test]
+    fn interprets_keba_udp_plug_value_3_as_not_vehicle_connected() {
+        let payload = json!({"Plug": 3, "Seconds": 100});
+
+        let parsed = parse_report2(&payload).expect("report2 must parse");
+
+        assert_eq!(
+            parsed,
+            Report2 {
+                plugged: false,
+                seconds: Some(100),
+                state: None,
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_binary_plug_value_1_as_plugged_for_legacy_sources() {
+        let payload = json!({"Plug": 1, "Seconds": 100});
+
+        let parsed = parse_report2(&payload).expect("report2 must parse");
+
+        assert_eq!(
+            parsed,
+            Report2 {
+                plugged: true,
+                seconds: Some(100),
                 state: None,
             }
         );

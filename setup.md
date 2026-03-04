@@ -316,7 +316,11 @@ sudo systemctl start keba-home-api-reader
 - Writer-Logs der betroffenen Station pruefen.
 - IP/Port/KEBA-Erreichbarkeit pruefen.
 - Auf `poller tick failed` Warnungen achten (zeigen Fetch/Parse-Probleme von `report 2` direkt im Log). Wiederholte Fehler werden gebuendelt, damit Zustandswechsel-Logs sichtbar bleiben.
-- `unplug_log_events`-Insert passiert beim debouncten Uebergang `Plug true -> false` (Abstecken). Der Wechsel wird erst nach `DEBOUNCE_SAMPLES` gleichen Polls (Default `3`) bestaetigt; ohne bestaetigten Zustandswechsel wird kein neuer Unplug-Eintrag angelegt.
+- `unplug_log_events`-Insert passiert beim debouncten Uebergang `vehicleConnected true -> false` (Abstecken).
+- Fuer UDP-`Plug`-Werte gilt: `>=5` bedeutet Fahrzeug verbunden (`5/7`), `0/1/3` gilt als nicht fahrzeugverbunden. Damit wird bei festen Kabeln ein Wechsel `7 -> 3` korrekt als Abstecken erkannt.
+- Der Wechsel wird erst nach `DEBOUNCE_SAMPLES` gleichen Polls (Default `3`) bestaetigt; ohne bestaetigten Zustandswechsel wird kein neuer Unplug-Eintrag angelegt.
+- Beim Service-Start wird der initiale stabile Plug-Status direkt uebernommen. Startet der Service bei bereits verbundenem Fahrzeug, bleibt der interne Zustand sofort `true` und ein spaeteres Abziehen kann ohne vorheriges Zwischen-Event korrekt persistiert werden.
+- Beim Abziehen werden Report `100..130` fuer Sessiondetails durchsucht. Falls unmittelbar nach dem Unplug noch kein vollstaendiger Report vorliegt, werden die 1xx-Reports mehrfach mit kurzem Abstand erneut gelesen (Retry-Fenster), bevor auf `n/a` gefallen wird.
 
 4. Session mit `startedAt: null`:
 - Erwartetes Verhalten, wenn der Service waehrend einer bereits laufenden/angesteckten Session gestartet wurde.
