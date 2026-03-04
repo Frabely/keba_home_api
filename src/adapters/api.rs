@@ -259,6 +259,11 @@ fn parse_session_timestamp_ms(
     {
         return Some(absolute_ms);
     }
+    if let Some(raw_numeric) = parse_number(value)
+        && let Some(numeric_timestamp_ms) = parse_numeric_timestamp_ms(raw_numeric, now_ms)
+    {
+        return Some(numeric_timestamp_ms);
+    }
 
     if let Some(sec_now) = sec_from_report100
         && let Some(raw_seconds) = parse_number(value)
@@ -277,6 +282,25 @@ fn is_plausible_absolute_timestamp_ms(timestamp_ms: i64, now_ms: i64) -> bool {
     const MIN_PLAUSIBLE_TIMESTAMP_MS: i64 = 946_684_800_000; // 2000-01-01T00:00:00Z
     const MAX_FUTURE_DRIFT_MS: i64 = 86_400_000; // +24h
     timestamp_ms >= MIN_PLAUSIBLE_TIMESTAMP_MS && timestamp_ms <= now_ms + MAX_FUTURE_DRIFT_MS
+}
+
+fn parse_numeric_timestamp_ms(raw_value: f64, now_ms: i64) -> Option<i64> {
+    if !raw_value.is_finite() || raw_value < 0.0 {
+        return None;
+    }
+    const MIN_PLAUSIBLE_TIMESTAMP_SECONDS: f64 = 946_684_800.0; // 2000-01-01T00:00:00Z
+    const MAX_FUTURE_DRIFT_SECONDS: f64 = 86_400.0; // +24h
+    let now_seconds = (now_ms as f64) / 1000.0;
+    if (MIN_PLAUSIBLE_TIMESTAMP_SECONDS..=now_seconds + MAX_FUTURE_DRIFT_SECONDS)
+        .contains(&raw_value)
+    {
+        return Some((raw_value * 1000.0).round() as i64);
+    }
+    let raw_ms = raw_value.round() as i64;
+    if is_plausible_absolute_timestamp_ms(raw_ms, now_ms) {
+        return Some(raw_ms);
+    }
+    None
 }
 
 fn normalize_key(input: &str) -> String {
@@ -925,6 +949,77 @@ mod tests {
         assert_eq!(json["kWh"], 20.064);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC1");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_accepts_epoch_seconds_from_started_seconds_field() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                if cmd == "report 100" {
+                    let payload = r#"{"E Pres":81984,"Sec":779184,"started[s]":1772546661,"ended[s]":1772605949,"started":"2026-03-03 14:04:21.000","ended":"2026-03-04 06:32:29.000","RFID tag":"SSEC2"}"#;
+                    responder
+                        .send_to(payload.as_bytes(), from)
+                        .expect("responder send should succeed");
+                }
+            }
+        });
+
+        let mut state = empty_state();
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["started"], 1_772_546_661_000_i64);
+        assert_eq!(json["ended"], 1_772_605_949_000_i64);
+        assert_eq!(json["kWh"], 81.984);
+        assert_eq!(json["reportId"], 100);
+        assert_eq!(json["CardId"], "SSEC2");
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
         shutdown_socket

@@ -326,6 +326,11 @@ fn parse_session_timestamp_ms_from_object(
     {
         return Some(absolute_ms);
     }
+    if let Some(raw_numeric) = parse_f64(value)
+        && let Some(numeric_timestamp_ms) = parse_numeric_timestamp_ms(raw_numeric, now_ms)
+    {
+        return Some(numeric_timestamp_ms);
+    }
     if let Some(sec_now) = sec_from_report
         && let Some(raw_seconds) = parse_f64(value)
         && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
@@ -344,6 +349,25 @@ fn is_plausible_absolute_timestamp_ms(timestamp_ms: i64, now_ms: i64) -> bool {
     const MIN_PLAUSIBLE_TIMESTAMP_MS: i64 = 946_684_800_000; // 2000-01-01T00:00:00Z
     const MAX_FUTURE_DRIFT_MS: i64 = 86_400_000; // +24h
     timestamp_ms >= MIN_PLAUSIBLE_TIMESTAMP_MS && timestamp_ms <= now_ms + MAX_FUTURE_DRIFT_MS
+}
+
+fn parse_numeric_timestamp_ms(raw_value: f64, now_ms: i64) -> Option<i64> {
+    if !raw_value.is_finite() || raw_value < 0.0 {
+        return None;
+    }
+    const MIN_PLAUSIBLE_TIMESTAMP_SECONDS: f64 = 946_684_800.0; // 2000-01-01T00:00:00Z
+    const MAX_FUTURE_DRIFT_SECONDS: f64 = 86_400.0; // +24h
+    let now_seconds = (now_ms as f64) / 1000.0;
+    if (MIN_PLAUSIBLE_TIMESTAMP_SECONDS..=now_seconds + MAX_FUTURE_DRIFT_SECONDS)
+        .contains(&raw_value)
+    {
+        return Some((raw_value * 1000.0).round() as i64);
+    }
+    let raw_ms = raw_value.round() as i64;
+    if is_plausible_absolute_timestamp_ms(raw_ms, now_ms) {
+        return Some(raw_ms);
+    }
+    None
 }
 
 fn start_poller(

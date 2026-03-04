@@ -7,10 +7,12 @@ pub mod services;
 pub use error::AppError;
 
 pub fn run() -> Result<(), AppError> {
+    try_load_dotenv_for_ide_debug();
     run_combined()
 }
 
 pub fn run_combined() -> Result<(), AppError> {
+    try_load_dotenv_for_ide_debug();
     logging::init()?;
     let config = config::AppConfig::from_env()?;
     log_bootstrap("combined", &config);
@@ -18,6 +20,7 @@ pub fn run_combined() -> Result<(), AppError> {
 }
 
 pub fn run_service() -> Result<(), AppError> {
+    try_load_dotenv_for_ide_debug();
     logging::init()?;
     let config = config::AppConfig::from_env()?;
     log_bootstrap("service", &config);
@@ -25,10 +28,21 @@ pub fn run_service() -> Result<(), AppError> {
 }
 
 pub fn run_api() -> Result<(), AppError> {
+    try_load_dotenv_for_ide_debug();
     logging::init()?;
     let config = config::AppConfig::from_env_for_api()?;
     log_bootstrap("api", &config);
     runtime::run_api(config)
+}
+
+fn try_load_dotenv_for_ide_debug() {
+    #[cfg(debug_assertions)]
+    {
+        // Opt-in for local IDE debug runs only.
+        if std::env::var("KEBA_IDE_DEBUG").ok().as_deref() == Some("1") {
+            let _ = dotenvy::dotenv();
+        }
+    }
 }
 
 fn log_bootstrap(mode: &str, config: &config::AppConfig) {
