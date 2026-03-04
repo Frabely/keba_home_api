@@ -71,3 +71,6 @@ or
   "error": "reports 100-130 do not contain started/end timestamps and E Pres > 0"
 }
 ```
+Hinweis zu `kWh`:
+- `E Pres` Werte `>= 1000` werden als Wh interpretiert und in kWh umgerechnet (`/1000`).
+- Kleinere Werte werden als bereits in kWh geliefert behandelt.

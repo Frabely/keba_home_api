@@ -208,11 +208,14 @@ fn extract_unplug_details_from_report(
             "energy_present_session",
         ],
     )
-    .and_then(parse_f64);
+    .and_then(parse_f64)
+    .map(normalize_session_kwh);
 
     let started_ms = parse_session_timestamp_ms_from_object(
         report,
         &[
+            "started[s]",
+            "Started[s]",
             "started",
             "Started",
             "start",
@@ -223,7 +226,15 @@ fn extract_unplug_details_from_report(
     );
     let ended_ms = parse_session_timestamp_ms_from_object(
         report,
-        &["ended", "Ended", "end", "session_end", "Session End"],
+        &[
+            "ended[s]",
+            "Ended[s]",
+            "ended",
+            "Ended",
+            "end",
+            "session_end",
+            "Session End",
+        ],
         disconnected_at_ms,
     );
 
@@ -274,6 +285,14 @@ fn parse_f64(value: &Value) -> Option<f64> {
     }
 }
 
+fn normalize_session_kwh(raw_energy: f64) -> f64 {
+    if raw_energy >= 1000.0 {
+        raw_energy / 1000.0
+    } else {
+        raw_energy
+    }
+}
+
 fn stringify_value(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -282,19 +301,16 @@ fn stringify_value(value: &Value) -> String {
 }
 
 fn parse_absolute_timestamp_ms(value: &Value) -> Option<i64> {
-    match value {
-        Value::Number(number) => number.as_i64(),
-        Value::String(text) => {
-            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
-                return Some(parsed.timestamp_millis());
-            }
-            if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.3f") {
-                return Some(Utc.from_utc_datetime(&parsed).timestamp_millis());
-            }
-            text.trim().parse::<i64>().ok()
-        }
-        _ => None,
+    let Value::String(text) = value else {
+        return None;
+    };
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(parsed.timestamp_millis());
     }
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.3f") {
+        return Some(Utc.from_utc_datetime(&parsed).timestamp_millis());
+    }
+    None
 }
 
 fn parse_session_timestamp_ms_from_object(
@@ -305,15 +321,29 @@ fn parse_session_timestamp_ms_from_object(
     let sec_from_report =
         find_value(object, &["Sec", "sec", "Seconds", "seconds"]).and_then(parse_f64);
     let value = find_value(object, aliases)?;
+    if let Some(absolute_ms) = parse_absolute_timestamp_ms(value)
+        && is_plausible_absolute_timestamp_ms(absolute_ms, now_ms)
+    {
+        return Some(absolute_ms);
+    }
     if let Some(sec_now) = sec_from_report
         && let Some(raw_seconds) = parse_f64(value)
         && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
     {
         let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
-        return Some(ts.round() as i64);
+        let ts_ms = ts.round() as i64;
+        if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+            return Some(ts_ms);
+        }
     }
 
-    parse_absolute_timestamp_ms(value)
+    None
+}
+
+fn is_plausible_absolute_timestamp_ms(timestamp_ms: i64, now_ms: i64) -> bool {
+    const MIN_PLAUSIBLE_TIMESTAMP_MS: i64 = 946_684_800_000; // 2000-01-01T00:00:00Z
+    const MAX_FUTURE_DRIFT_MS: i64 = 86_400_000; // +24h
+    timestamp_ms >= MIN_PLAUSIBLE_TIMESTAMP_MS && timestamp_ms <= now_ms + MAX_FUTURE_DRIFT_MS
 }
 
 fn start_poller(
