@@ -249,7 +249,7 @@ fn extract_unplug_details_from_report(
 
     if let (Some(started), Some(ended), Some(kwh)) = (started_ms, ended_ms, kwh_value)
         && started > 0
-        && ended > 0
+        && ended >= started
         && kwh > 0.0
     {
         return UnplugLogDetails {
@@ -321,6 +321,11 @@ fn parse_session_timestamp_ms_from_object(
     let sec_from_report =
         find_value(object, &["Sec", "sec", "Seconds", "seconds"]).and_then(parse_f64);
     let value = find_value(object, aliases)?;
+    if let Some(raw_numeric) = parse_f64(value)
+        && raw_numeric <= 0.0
+    {
+        return None;
+    }
     if let Some(absolute_ms) = parse_absolute_timestamp_ms(value)
         && is_plausible_absolute_timestamp_ms(absolute_ms, now_ms)
     {
@@ -780,6 +785,67 @@ mod tests {
         assert_eq!(row.1, "2026-03-02 04:01");
         assert_eq!(row.2, "6.540");
         assert_eq!(row.3, "R103");
+    }
+
+    #[test]
+    fn unplug_transition_skips_report_with_zero_ended_seconds_and_uses_next_report() {
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-unplug-report-1xx-ended-seconds-zero",
+        )));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 1}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+            ],
+            vec![
+                json!({"Energy (present session)": 0.0, "Energy (total)": 10.0}),
+                json!({"Energy (present session)": 7.2, "Energy (total)": 17.2}),
+            ],
+        )
+        .with_1xx_reports(vec![
+            (
+                100,
+                json!({"E Pres": 7.1077, "Sec": 195395, "started[s]": 191012, "ended[s]": 0, "started": "191012000", "ended": "0", "RFID tag": "R100"}),
+            ),
+            (
+                101,
+                json!({"E Pres": 6.54, "Sec": 195395, "started[s]": 182170, "ended[s]": 184901, "RFID tag": "R101"}),
+            ),
+        ]);
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..9 {
+            poller.tick().expect("poll tick should succeed");
+        }
+
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
+        let row: (String, String, String, String) = db
+            .query_row(
+                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("inserted unplug event should be readable");
+
+        assert_eq!(row.2, "6.540");
+        assert_eq!(row.3, "R101");
     }
 
     #[test]
