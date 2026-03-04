@@ -1,9 +1,11 @@
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, web};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapters::keba_udp::KebaUdpClient;
+const API_KEY_HEADER: &str = "X-API-Key";
+const API_KEY_VALUE: &str = "1r0m";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -46,13 +48,39 @@ async fn health() -> impl Responder {
 }
 
 #[get("/sessions/carport/latest")]
-async fn get_carport_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
+async fn get_carport_latest_report100_endpoint(
+    req: HttpRequest,
+    state: web::Data<ApiState>,
+) -> impl Responder {
+    if !has_valid_api_key(&req) {
+        return unauthorized_response();
+    }
     latest_report100_response(&state, "carport")
 }
 
 #[get("/sessions/entrance/latest")]
-async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
+async fn get_entrance_latest_report100_endpoint(
+    req: HttpRequest,
+    state: web::Data<ApiState>,
+) -> impl Responder {
+    if !has_valid_api_key(&req) {
+        return unauthorized_response();
+    }
     latest_report100_response(&state, "entrance")
+}
+
+fn has_valid_api_key(req: &HttpRequest) -> bool {
+    req.headers()
+        .get(API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == API_KEY_VALUE)
+        .unwrap_or(false)
+}
+
+fn unauthorized_response() -> HttpResponse {
+    HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": "missing or invalid API key"
+    }))
 }
 
 fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpResponse {
@@ -345,6 +373,28 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn sessions_endpoint_returns_unauthorized_without_api_key() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["error"], "missing or invalid API key");
+    }
+
+    #[actix_web::test]
     async fn carport_latest_endpoint_returns_report100_payload() {
         let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
         responder
@@ -390,6 +440,7 @@ mod tests {
 
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -431,6 +482,7 @@ mod tests {
         .await;
         let req = test::TestRequest::get()
             .uri("/sessions/entrance/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -488,6 +540,7 @@ mod tests {
 
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -587,6 +640,7 @@ mod tests {
 
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -674,6 +728,7 @@ mod tests {
         let now_before = Utc::now().timestamp_millis();
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         let now_after = Utc::now().timestamp_millis();
@@ -763,6 +818,7 @@ mod tests {
         let now_before = Utc::now().timestamp_millis();
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         let now_after = Utc::now().timestamp_millis();
@@ -851,6 +907,7 @@ mod tests {
 
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -921,6 +978,7 @@ mod tests {
         let now_before = Utc::now().timestamp_millis();
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         let now_after = Utc::now().timestamp_millis();
@@ -1008,6 +1066,7 @@ mod tests {
 
         let req = test::TestRequest::get()
             .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);

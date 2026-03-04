@@ -2,6 +2,7 @@
 
 All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
 JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`).
+Session endpoints require API key header: `X-API-Key: 1r0m`.
 
 ## `GET /health`
 Health check endpoint.
@@ -24,7 +25,7 @@ The API takes the first report where `started > 0`, `ended > 0` and `E Pres > 0`
 
 Example:
 ```bash
-curl -s http://localhost:8080/sessions/carport/latest | jq
+curl -s -H "X-API-Key: 1r0m" http://localhost:8080/sessions/carport/latest | jq
 ```
 
 Response `200`:
@@ -43,7 +44,7 @@ Same contract as `/sessions/carport/latest`, but for station `entrance`.
 
 Example:
 ```bash
-curl -s http://localhost:8080/sessions/entrance/latest | jq
+curl -s -H "X-API-Key: 1r0m" http://localhost:8080/sessions/entrance/latest | jq
 ```
 
 Response `200`: same JSON shape as above.
@@ -69,6 +70,13 @@ or
 ```json
 {
   "error": "reports 100-130 do not contain started/end timestamps and E Pres > 0"
+}
+```
+
+`401` (missing/invalid API key):
+```json
+{
+  "error": "missing or invalid API key"
 }
 ```
 Hinweis zu `kWh`:
