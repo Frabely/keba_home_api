@@ -135,12 +135,17 @@ Alle drei Services gemeinsam neu starten:
 ```bash
 bash scripts/restart_services.sh
 ```
+Das Script restartet alle drei Units, wartet auf `active` und zeigt danach Status + letzte Journal-Logs pro Service.
 
 Deploy + Restart + Checks am Pi in einem Lauf:
 ```bash
 chmod +x scripts/post_deploy_check.sh
 bash scripts/post_deploy_check.sh
 ```
+Wichtig:
+- `post_deploy_check.sh` muss aus dem Git-Checkout ausgefuehrt werden (z. B. `~/repos/keba_home_api`), nicht aus `/opt/keba_home_api`.
+- Das Script baut im Repo, installiert die Binaries in die von systemd verwendeten `ExecStart`-Pfade und startet danach alle Services neu.
+- Die API-Pruefung validiert `/health` strikt (`status=ok`) und gibt fuer `/sessions/carport/latest` entweder Nutzdaten oder den Fehler-JSON-Body explizit aus.
 
 Logs:
 ```bash

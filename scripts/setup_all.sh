@@ -144,6 +144,9 @@ echo "[3/6] installing binaries and scripts..."
 sudo install -m 0755 "${REPO_ROOT}/target/release/keba_service" /opt/keba_home_api/keba_service
 sudo install -m 0755 "${REPO_ROOT}/target/release/keba_api" /opt/keba_home_api/keba_api
 sudo install -m 0755 "${REPO_ROOT}/scripts/backup_keba_db.sh" /opt/keba_home_api/scripts/backup_keba_db.sh
+sudo install -m 0755 "${REPO_ROOT}/scripts/post_deploy_check.sh" /opt/keba_home_api/scripts/post_deploy_check.sh
+sudo install -m 0755 "${REPO_ROOT}/scripts/restart_services.sh" /opt/keba_home_api/scripts/restart_services.sh
+sudo install -m 0755 "${REPO_ROOT}/scripts/start_all_services.sh" /opt/keba_home_api/scripts/start_all_services.sh
 
 copy_if_missing() {
   local src="$1"
