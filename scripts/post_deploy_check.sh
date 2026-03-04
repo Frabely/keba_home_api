@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/opt/keba_home_api"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 
 cd "${REPO_DIR}"
 
@@ -12,8 +13,8 @@ echo "[2/6] Build release binaries"
 cargo build --release -p keba-service -p keba-api
 
 echo "[3/6] Install binaries"
-sudo install -m 0755 ./target/release/keba_service /opt/keba_home_api/keba_service
-sudo install -m 0755 ./target/release/keba_api /opt/keba_home_api/keba_api
+sudo install -m 0755 ./target/release/keba_service "${REPO_DIR}/keba_service"
+sudo install -m 0755 ./target/release/keba_api "${REPO_DIR}/keba_api"
 
 echo "[4/6] Restart services"
 bash scripts/restart_services.sh
