@@ -93,6 +93,7 @@ Wichtig:
 - `KEBA_IP` ist fuer jede Writer-Instanz verpflichtend.
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-carport.env` auf die Carport-Wallbox-IP.
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-eingang.env` auf die Eingang-Wallbox-IP.
+- `POLL_INTERVAL_MS` Default fuer Writer ist `20000` (20 Sekunden), falls der Wert in der ENV nicht gesetzt ist.
 - Fuer die API-Endpunkte `GET /sessions/carport/latest` und `GET /sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
@@ -130,6 +131,11 @@ sudo systemctl status keba-home-service@eingang
 sudo systemctl status keba-home-api-reader
 ```
 
+Alle drei Services gemeinsam neu starten:
+```bash
+bash scripts/restart_services.sh
+```
+
 Logs:
 ```bash
 sudo journalctl -u keba-home-service@carport -f
@@ -140,6 +146,7 @@ Log-Verhalten (Default `RUST_LOG=info`):
 - `INFO`: Startup + Zustandsaenderungen + Session-Lifecycle + Heartbeat (standardmaessig 1x/Minute via `STATUS_LOG_INTERVAL_SECONDS=60`)
 - `WARN/ERROR`: sofort bei Problemen
 - `DEBUG`: detaillierte Poll-/Request-Details nur bei aktivem Debug-Level
+- Unplug-Logfelder `started`/`ended` werden minutengenau (`YYYY-MM-DD HH:MM`) formatiert.
 - `LOG_FORMAT` steuert die Ausgabeform:
   - `compact` (Default, empfohlen fuer Konsole/Journal)
   - `pretty` (mehrzeilig, human-readable)
@@ -167,15 +174,13 @@ sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-
 ## API Smoke Check
 ```bash
 curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8080/diagnostics/db
+curl -s http://127.0.0.1:8080/sessions/carport/latest
 ```
 
 ## SQLite Parallelzugriff
 - Writer nutzen SQLite mit `WAL`, `busy_timeout`, `foreign_keys`.
-- API oeffnet die DB read-only (`query_only=ON`).
-- Viele Leser + ein Schreiber gleichzeitig sind moeglich.
+- Die API liest die DB aktuell nicht mehr; Persistenz wird nur fuer `unplug_log_events` durch die Writer genutzt.
 - Zwei Writer serialisieren ihre Writes.
-- Bei `BUSY/LOCKED` wird Session-Persistenz mit Backoff mehrfach retryt.
 
 ## Raspberry Pi Hinweise
 

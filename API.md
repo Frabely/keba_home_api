@@ -1,216 +1,71 @@
-# API Documentation
+# API Contract
 
-Base URL (default): `http://localhost:8080`
+All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
+JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`).
 
-All timestamps are UTC ISO-8601 (`...Z`), JSON fields are `camelCase`.
-`startedAt` is nullable when the service starts while a cable is already plugged in and the true session start is unknown.
+## `GET /health`
+Health check endpoint.
 
-## Runtime Split
-
-Recommended production setup runs two separate processes against the same SQLite file:
-- `keba_service` writes polling/session/log data into `DB_PATH`
-- `keba_api` reads data from the same `DB_PATH` and serves HTTP
-
-Current scope: `keba_api` is intentionally read-only.
-- It opens SQLite in read-only/query-only mode.
-- It exposes only GET endpoints and does not mutate state.
-- If write endpoints are introduced later, this section must be updated.
-
-## Quick Check
-
+Example:
 ```bash
 curl -s http://localhost:8080/health | jq
 ```
 
-Expected:
-
-```json
-{ "status": "ok" }
-```
-
-## Endpoints
-
-### 1) Health
-
-`GET /health`
-
-Purpose: service liveness probe.
-
-Example:
-
-```bash
-curl -s http://localhost:8080/health | jq
-```
-
-### 2) Latest Session
-
-`GET /sessions/latest`
-
-Purpose: returns the latest persisted charging session.
-
-Example:
-
-```bash
-curl -s http://localhost:8080/sessions/latest | jq
-```
-
-Success response (`200`):
-
+Response `200`:
 ```json
 {
-  "id": "4f7aa40a-f2d6-4e4f-b2d0-414f32f11de1",
-  "startedAt": "2026-02-27T14:42:00.000Z",
-  "finishedAt": "2026-02-27T14:46:00.000Z",
-  "durationMs": 240000,
-  "kwh": 4.0
+  "status": "ok"
 }
 ```
 
-If none exists (`404`):
-
-```json
-{ "error": "no sessions available" }
-```
-
-### 3) Session List (Pagination)
-
-`GET /sessions?limit=<1..500>&offset=<0..>`
-
-Purpose: paginated list, newest first.
+## `GET /sessions/carport/latest`
+Fetch latest session view from KEBA `report 100` (fallback to `report 101` if `ended` in `report 100` is `0`).
 
 Example:
-
-```bash
-curl -s "http://localhost:8080/sessions?limit=20&offset=0" | jq
-```
-
-### 3a) Latest Station Session via KEBA `report 100`
-
-`GET /sessions/carport/latest`  
-`GET /sessions/entrance/latest`
-
-Purpose: fetches KEBA live session data directly from the mapped station via UDP `report 100`.
-
-Response shape (`200`):
-
-```json
-{
-  "kWh": 12.34,
-  "started": 1772386819000,
-  "ended": 1772427719000,
-  "CardId": "ABC123"
-}
-```
-
-Examples:
-
 ```bash
 curl -s http://localhost:8080/sessions/carport/latest | jq
+```
+
+Response `200`:
+```json
+{
+  "kWh": 7.65,
+  "started": 1772386819000,
+  "ended": 1772427719000,
+  "CardId": "XYZ999"
+}
+```
+
+## `GET /sessions/entrance/latest`
+Same contract as `/sessions/carport/latest`, but for station `entrance`.
+
+Example:
+```bash
 curl -s http://localhost:8080/sessions/entrance/latest | jq
 ```
 
-Errors:
-- `404` if station mapping is missing (`carport` / `entrance`)
-- `502` if `report 100` cannot be fetched/parsed from station
-- Falls `ended` in `report 100` fehlt oder `<= 0` ist, wird automatisch `report 101` abgefragt und die Antwort komplett aus `report 101` aufgebaut (`kWh`, `started`, `ended`, `CardId`).
+Response `200`: same JSON shape as above.
 
-### 4) Recent Session (last 5 minutes)
+## Error Responses
 
-`GET /sessions/recent`
-
-Purpose: returns latest session only if created within the last 5 minutes.
-
-Example:
-
-```bash
-curl -i -s http://localhost:8080/sessions/recent
-```
-
-Responses:
-- `200` with session body (same shape as `/sessions/latest`)
-- `204 No Content` if none in last 5 minutes
-
-### 5) DB Diagnostics
-
-`GET /diagnostics/db`
-
-Purpose: runtime DB state for diagnostics.
-
-Example:
-
-```bash
-curl -s http://localhost:8080/diagnostics/db | jq
-```
-
-Response (`200`):
-
+`404` (station mapping missing):
 ```json
 {
-  "schemaVersion": 5,
-  "sessionsCount": 12,
-  "logEventsCount": 37,
-  "latestSession": {
-    "id": "0b06eb56-e000-4f66-83e2-b6324afe6f12",
-    "status": "completed",
-    "startedReason": "service_started_while_plugged",
-    "finishedReason": "plug_state_transition",
-    "startedAt": null,
-    "finishedAt": "2026-02-27T14:46:00.000Z",
-    "durationMs": 240000,
-    "kwh": 4.0,
-    "errorCountDuringSession": 1
-  }
+  "error": "station mapping for 'entrance' is not configured"
 }
 ```
 
-### 6) Recent Log Events Diagnostics
-
-`GET /diagnostics/log-events?limit=<1..500>`
-
-Purpose: inspect latest persisted poll/service log events.
-
-Example:
-
-```bash
-curl -s "http://localhost:8080/diagnostics/log-events?limit=20" | jq
-```
-
-Response (`200`) example item:
-
+`502` (KEBA communication/payload issue):
 ```json
 {
-  "id": "b4b95a7f-cf4f-4ca8-a363-5f4a7f95b9f9",
-  "createdAt": "2026-02-27T22:53:46.574Z",
-  "level": "warn",
-  "code": "poll.fetch_report2",
-  "message": "failed to fetch report 2: transport communication failed: ...",
-  "source": "udp",
-  "stationId": "carport",
-  "detailsJson": "{\"activeSession\":true,\"errorCountDuringSession\":3}"
+  "error": "failed to fetch report 100: transport communication failed: ..."
 }
 ```
 
-## Error Model
-
-Current error payload shape:
+or
 
 ```json
-{ "error": "<message>" }
-```
-
-Typical statuses:
-- `200` success
-- `204` no content (`/sessions/recent`)
-- `404` not found (`/sessions/latest` when empty)
-- `500` internal/service/database errors
-
-## Best-Practice Call Set (for smoke checks)
-
-```bash
-curl -s http://localhost:8080/health | jq
-curl -s http://localhost:8080/diagnostics/db | jq
-curl -s "http://localhost:8080/diagnostics/log-events?limit=10" | jq
-curl -s http://localhost:8080/sessions/latest | jq
-curl -s "http://localhost:8080/sessions?limit=10&offset=0" | jq
-curl -i -s http://localhost:8080/sessions/recent
+{
+  "error": "report 100/101 payload does not contain valid started/ended timestamps"
+}
 ```

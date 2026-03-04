@@ -27,6 +27,8 @@ pub enum PollerError {
     ParseReport2(#[source] ParseError),
 }
 
+const POLLER_WARN_AFTER_CONSECUTIVE_ERRORS: u32 = 3;
+
 pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
     session_commands: SqliteSessionService,
@@ -75,11 +77,17 @@ impl PlugStatusPoller {
 
     pub fn note_poll_error(&mut self, error: &PollerError) {
         self.consecutive_poll_errors += 1;
-        if self.consecutive_poll_errors == 1 {
-            tracing::warn!(error = %error, "poller tick failed");
+        if self.consecutive_poll_errors < POLLER_WARN_AFTER_CONSECUTIVE_ERRORS {
+            tracing::debug!(
+                error = %error,
+                consecutive_errors = self.consecutive_poll_errors,
+                "poller tick transient failure"
+            );
             return;
         }
-        if self.consecutive_poll_errors.is_multiple_of(10) {
+        if self.consecutive_poll_errors == POLLER_WARN_AFTER_CONSECUTIVE_ERRORS
+            || self.consecutive_poll_errors.is_multiple_of(10)
+        {
             tracing::warn!(
                 error = %error,
                 consecutive_errors = self.consecutive_poll_errors,
@@ -89,7 +97,7 @@ impl PlugStatusPoller {
     }
 
     fn log_status_change(&self, plugged: bool) {
-        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp = Utc::now().format("%Y-%m-%d %H:%M").to_string();
         let status = if plugged { "Angesteckt" } else { "Abgesteckt" };
 
         if plugged {
@@ -218,7 +226,7 @@ impl UnplugLogDetails {
 
 fn format_ts(value_ms: i64) -> String {
     match Utc.timestamp_millis_opt(value_ms).single() {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
         None => "n/a".to_string(),
     }
 }
@@ -295,7 +303,6 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let shared_connection = open_shared_connection_writer(&config.db_path)?;
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
-        session_queries: session_service.clone(),
         report100_stations: build_report100_stations(&config),
     };
 
@@ -335,10 +342,7 @@ pub fn run_service(config: AppConfig) -> Result<(), AppError> {
 }
 
 pub fn run_api(config: AppConfig) -> Result<(), AppError> {
-    let shared_connection = open_shared_connection_reader(&config.db_path)?;
-    let session_service = crate::app::services::SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
-        session_queries: session_service,
         report100_stations: build_report100_stations(&config),
     };
 
@@ -349,19 +353,6 @@ fn open_shared_connection_writer(db_path: &str) -> Result<Arc<Mutex<Connection>>
     let mut connection =
         crate::adapters::db::open_connection(db_path).map_err(AppError::database_init)?;
     crate::adapters::db::run_migrations(&mut connection).map_err(AppError::database_init)?;
-    Ok(Arc::new(Mutex::new(connection)))
-}
-
-fn open_shared_connection_reader(db_path: &str) -> Result<Arc<Mutex<Connection>>, AppError> {
-    let connection =
-        crate::adapters::db::open_read_only_connection(db_path).map_err(AppError::database_init)?;
-    let version =
-        crate::adapters::db::schema_version(&connection).map_err(AppError::database_init)?;
-    if version == 0 {
-        return Err(AppError::database_init(
-            "database schema is not initialized; start writer service first",
-        ));
-    }
     Ok(Arc::new(Mutex::new(connection)))
 }
 
@@ -600,12 +591,8 @@ mod tests {
         let unplug_count: i64 = db
             .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
             .expect("unplug count query should succeed");
-        let session_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM charging_sessions", [], |row| row.get(0))
-            .expect("session count query should succeed");
 
         assert_eq!(unplug_count, 1);
-        assert_eq!(session_count, 0);
     }
 
     #[test]
@@ -645,5 +632,6 @@ mod tests {
             .expect("unplug count query should succeed");
         assert_eq!(unplug_count, 0);
     }
+
 }
 

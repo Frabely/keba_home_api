@@ -6,7 +6,7 @@ pub use crate::domain::models::{
 };
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (
@@ -279,6 +279,24 @@ CREATE TABLE IF NOT EXISTS unplug_log_events (
 
 CREATE INDEX IF NOT EXISTS idx_unplug_log_events_timestamp_desc
 ON unplug_log_events (timestamp DESC, id DESC);
+"#,
+    ),
+    (
+        7,
+        r#"
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS charging_sessions_v2;
+DROP TABLE IF EXISTS charging_sessions_v3;
+DROP TABLE IF EXISTS log_events_v2;
+DROP TABLE IF EXISTS charging_session_log_events_v2;
+"#,
+    ),
+    (
+        8,
+        r#"
+DROP TABLE IF EXISTS charging_session_log_events;
+DROP TABLE IF EXISTS log_events;
+DROP TABLE IF EXISTS charging_sessions;
 "#,
     ),
 ];
@@ -646,10 +664,8 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        LATEST_SCHEMA_VERSION, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord,
-        count_log_events, count_session_log_events, get_latest_session, get_latest_session_since,
-        insert_log_event, insert_session, insert_unplug_log_event, link_session_log_events,
-        list_sessions, open_connection, run_migrations, schema_version,
+        LATEST_SCHEMA_VERSION, NewUnplugLogRecord, insert_unplug_log_event, open_connection,
+        run_migrations, schema_version,
     };
 
     fn temp_db_path(name: &str) -> PathBuf {
@@ -659,136 +675,76 @@ mod tests {
         path
     }
 
-    fn sample_new_session(
-        started_at: Option<&str>,
-        finished_at: &str,
-        created_at: &str,
-        energy_kwh: f64,
-    ) -> NewSessionRecord {
-        let started_ms = started_at.map(|value| {
-            chrono::DateTime::parse_from_rfc3339(value)
-                .expect("started_at should parse")
-                .timestamp_millis()
-        });
-        let finished_ms = chrono::DateTime::parse_from_rfc3339(finished_at)
-            .expect("finished_at should parse")
-            .timestamp_millis();
-
-        NewSessionRecord {
-            started_at: started_at.map(ToString::to_string),
-            finished_at: finished_at.to_string(),
-            duration_ms: started_ms.map_or(0, |value| (finished_ms - value).max(0)),
-            energy_kwh,
-            source: "debug_file".to_string(),
-            status: "completed".to_string(),
-            started_reason: "plug_state_transition".to_string(),
-            finished_reason: "plug_state_transition".to_string(),
-            poll_interval_ms: 1000,
-            debounce_samples: 2,
-            error_count_during_session: 0,
-            station_id: Some("station-a".to_string()),
-            created_at: created_at.to_string(),
-            raw_report2_start: Some("{\"Plug\":7}".to_string()),
-            raw_report3_start: Some("{\"E pres\":0}".to_string()),
-            raw_report2_end: Some("{\"Plug\":0}".to_string()),
-            raw_report3_end: Some("{\"E pres\":10830}".to_string()),
-        }
-    }
-
     #[test]
-    fn migrates_fresh_database_to_latest_version() {
+    fn migrates_fresh_database_to_latest_version_with_unplug_table_only() {
         let db_path = temp_db_path("fresh.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
+        let mut connection = open_connection(db_path.to_str().expect("db path should be utf8"))
+            .expect("connection should open");
 
         run_migrations(&mut connection).expect("migrations should succeed");
-
-        let version = schema_version(&connection).expect("schema version should be queryable");
+        let version = schema_version(&connection).expect("version should be readable");
         assert_eq!(version, LATEST_SCHEMA_VERSION);
 
-        let table_exists: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='charging_sessions'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("charging_sessions table check should work");
-        assert_eq!(table_exists, 1);
-
-        let log_events_exists: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='log_events'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("log_events table check should work");
-        assert_eq!(log_events_exists, 1);
-
-        let session_log_events_exists: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='charging_session_log_events'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("charging_session_log_events table check should work");
-        assert_eq!(session_log_events_exists, 1);
-
-        let unplug_events_exists: i64 = connection
+        let unplug_exists: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='unplug_log_events'",
                 [],
                 |row| row.get(0),
             )
             .expect("unplug_log_events table check should work");
-        assert_eq!(unplug_events_exists, 1);
+        assert_eq!(unplug_exists, 1);
 
-        let old_table_exists: i64 = connection
+        let charging_exists: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='charging_sessions'",
                 [],
                 |row| row.get(0),
             )
-            .expect("sessions table check should work");
-        assert_eq!(old_table_exists, 0);
+            .expect("charging_sessions table check should work");
+        assert_eq!(charging_exists, 0);
 
-        let started_at_notnull: i64 = connection
+        let log_exists: i64 = connection
             .query_row(
-                "SELECT \"notnull\" FROM pragma_table_info('charging_sessions') WHERE name = 'started_at'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='log_events'",
                 [],
                 |row| row.get(0),
             )
-            .expect("started_at column metadata query should succeed");
-        assert_eq!(started_at_notnull, 0);
+            .expect("log_events table check should work");
+        assert_eq!(log_exists, 0);
+    }
 
-        let index_exists: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_charging_sessions_created_at_desc'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("charging_sessions index check should work");
-        assert_eq!(index_exists, 1);
+    #[test]
+    fn migrations_are_idempotent() {
+        let db_path = temp_db_path("idempotent.sqlite");
+        let mut connection = open_connection(db_path.to_str().expect("db path should be utf8"))
+            .expect("connection should open");
+
+        run_migrations(&mut connection).expect("first migration run should succeed");
+        run_migrations(&mut connection).expect("second migration run should succeed");
+
+        let version = schema_version(&connection).expect("version should be readable");
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
     }
 
     #[test]
     fn inserts_unplug_log_event() {
-        let db_path = temp_db_path("unplug-log.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
+        let db_path = temp_db_path("unplug.sqlite");
+        let mut connection = open_connection(db_path.to_str().expect("db path should be utf8"))
+            .expect("connection should open");
         run_migrations(&mut connection).expect("migrations should succeed");
 
         let event = NewUnplugLogRecord {
-            timestamp: "2026-03-02 18:00:00".to_string(),
+            timestamp: "2026-02-20 21:49".to_string(),
             station: "Carport".to_string(),
-            started: "2026-03-02 17:30:00".to_string(),
-            ended: "2026-03-02 18:00:00".to_string(),
-            kwh: "7.650".to_string(),
-            card_id: "XYZ999".to_string(),
+            started: "2026-02-20 20:10".to_string(),
+            ended: "2026-02-20 21:49".to_string(),
+            kwh: "12.345".to_string(),
+            card_id: "ABC123".to_string(),
         };
 
         let id = insert_unplug_log_event(&connection, &event).expect("insert should succeed");
 
-        let stored: (String, String, String, String, String, String, String) = connection
+        let row: (String, String, String, String, String, String, String) = connection
             .query_row(
                 "SELECT id, timestamp, station, started, ended, kwh, card_id FROM unplug_log_events WHERE id = ?1",
                 params![id],
@@ -804,271 +760,13 @@ mod tests {
                     ))
                 },
             )
-            .expect("stored row should exist");
+            .expect("inserted event should be readable");
 
-        assert_eq!(stored.1, "2026-03-02 18:00:00");
-        assert_eq!(stored.2, "Carport");
-        assert_eq!(stored.3, "2026-03-02 17:30:00");
-        assert_eq!(stored.4, "2026-03-02 18:00:00");
-        assert_eq!(stored.5, "7.650");
-        assert_eq!(stored.6, "XYZ999");
-    }
-
-    #[test]
-    fn migrations_are_idempotent() {
-        let db_path = temp_db_path("idempotent.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-
-        run_migrations(&mut connection).expect("first migration run should succeed");
-        run_migrations(&mut connection).expect("second migration run should succeed");
-
-        let version = schema_version(&connection).expect("schema version should be queryable");
-        assert_eq!(version, LATEST_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn keeps_existing_data_when_migrations_rerun() {
-        let db_path = temp_db_path("rerun.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-
-        connection
-            .execute_batch(
-                r#"
-                PRAGMA user_version = 1;
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    plugged_at TEXT NOT NULL,
-                    unplugged_at TEXT NOT NULL,
-                    kwh REAL NOT NULL,
-                    created_at TEXT NOT NULL,
-                    raw_report2 TEXT,
-                    raw_report3 TEXT
-                );
-                "#,
-            )
-            .expect("legacy schema setup should succeed");
-        connection
-            .execute(
-                "INSERT INTO sessions (plugged_at, unplugged_at, kwh, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    "2026-02-20T18:12:03.120Z",
-                    "2026-02-20T22:45:10.002Z",
-                    10.83_f64,
-                    "2026-02-20T22:45:10.002Z"
-                ],
-            )
-            .expect("insert should succeed");
-
-        run_migrations(&mut connection).expect("migration run should succeed");
-        run_migrations(&mut connection).expect("rerun migration should succeed");
-
-        let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM charging_sessions", [], |row| {
-                row.get(0)
-            })
-            .expect("count query should succeed");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn returns_none_for_latest_session_when_empty() {
-        let db_path = temp_db_path("latest-empty.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        let latest = get_latest_session(&connection).expect("query should succeed");
-        assert_eq!(latest, None);
-    }
-
-    #[test]
-    fn inserts_and_reads_latest_session() {
-        let db_path = temp_db_path("latest.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        let inserted_id = insert_session(
-            &connection,
-            &sample_new_session(
-                Some("2026-02-20T18:12:03.120Z"),
-                "2026-02-20T22:45:10.002Z",
-                "2026-02-20T22:45:10.002Z",
-                10.83,
-            ),
-        )
-        .expect("insert should succeed");
-
-        let latest = get_latest_session(&connection)
-            .expect("query should succeed")
-            .expect("session should exist");
-
-        assert_eq!(latest.id, inserted_id);
-        assert_eq!(latest.energy_kwh, 10.83);
-        assert_eq!(latest.status, "completed");
-        assert_eq!(latest.raw_report2_start.as_deref(), Some("{\"Plug\":7}"));
-        assert_eq!(latest.raw_report2_end.as_deref(), Some("{\"Plug\":0}"));
-    }
-
-    #[test]
-    fn inserts_and_reads_latest_session_with_null_started_at() {
-        let db_path = temp_db_path("latest-null-started-at.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        insert_session(
-            &connection,
-            &sample_new_session(
-                None,
-                "2026-02-20T22:45:10.002Z",
-                "2026-02-20T22:45:10.002Z",
-                10.83,
-            ),
-        )
-        .expect("insert should succeed");
-
-        let latest = get_latest_session(&connection)
-            .expect("query should succeed")
-            .expect("session should exist");
-
-        assert_eq!(latest.started_at, None);
-    }
-
-    #[test]
-    fn lists_sessions_with_limit_and_offset() {
-        let db_path = temp_db_path("list.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        let sessions = [
-            sample_new_session(
-                Some("2026-02-20T10:00:00.000Z"),
-                "2026-02-20T11:00:00.000Z",
-                "2026-02-20T11:00:00.000Z",
-                5.0,
-            ),
-            sample_new_session(
-                Some("2026-02-21T10:00:00.000Z"),
-                "2026-02-21T11:00:00.000Z",
-                "2026-02-21T11:00:00.000Z",
-                6.0,
-            ),
-            sample_new_session(
-                Some("2026-02-22T10:00:00.000Z"),
-                "2026-02-22T11:00:00.000Z",
-                "2026-02-22T11:00:00.000Z",
-                7.0,
-            ),
-        ];
-
-        for session in sessions {
-            insert_session(&connection, &session).expect("insert should succeed");
-        }
-
-        let page = list_sessions(&connection, 2, 1).expect("query should succeed");
-
-        assert_eq!(page.len(), 2);
-        assert_eq!(page[0].energy_kwh, 6.0);
-        assert_eq!(page[1].energy_kwh, 5.0);
-    }
-
-    #[test]
-    fn returns_latest_session_since_threshold() {
-        let db_path = temp_db_path("latest-since.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        insert_session(
-            &connection,
-            &sample_new_session(
-                Some("2026-02-20T10:00:00.000Z"),
-                "2026-02-20T11:00:00.000Z",
-                "2026-02-20T11:00:00.000Z",
-                5.0,
-            ),
-        )
-        .expect("insert should succeed");
-        insert_session(
-            &connection,
-            &sample_new_session(
-                Some("2026-02-20T11:30:00.000Z"),
-                "2026-02-20T11:35:00.000Z",
-                "2026-02-20T11:35:00.000Z",
-                2.0,
-            ),
-        )
-        .expect("insert should succeed");
-
-        let found = get_latest_session_since(&connection, "2026-02-20T11:34:59.000Z")
-            .expect("query should succeed")
-            .expect("latest recent session should exist");
-        assert_eq!(found.energy_kwh, 2.0);
-
-        let not_found = get_latest_session_since(&connection, "2026-02-20T11:35:01.000Z")
-            .expect("query should succeed");
-        assert_eq!(not_found, None);
-    }
-
-    #[test]
-    fn inserts_log_events_and_links_them_to_session() {
-        let db_path = temp_db_path("logs-linking.sqlite");
-        let mut connection =
-            open_connection(db_path.to_string_lossy().as_ref()).expect("db connection should open");
-        run_migrations(&mut connection).expect("migrations should succeed");
-
-        let session_id = insert_session(
-            &connection,
-            &sample_new_session(
-                Some("2026-02-20T10:00:00.000Z"),
-                "2026-02-20T11:00:00.000Z",
-                "2026-02-20T11:00:00.000Z",
-                5.0,
-            ),
-        )
-        .expect("insert session should succeed");
-
-        let first_log_id = insert_log_event(
-            &connection,
-            &NewLogEventRecord {
-                created_at: "2026-02-20T10:10:00.000Z".to_string(),
-                level: "warn".to_string(),
-                code: "poll.fetch_report2".to_string(),
-                message: "failed to fetch report 2".to_string(),
-                source: "debug_file".to_string(),
-                station_id: Some("station-a".to_string()),
-                details_json: Some("{\"attempt\":1}".to_string()),
-            },
-        )
-        .expect("insert log event should succeed");
-        let second_log_id = insert_log_event(
-            &connection,
-            &NewLogEventRecord {
-                created_at: "2026-02-20T10:10:01.000Z".to_string(),
-                level: "warn".to_string(),
-                code: "poll.parse_report3".to_string(),
-                message: "failed to parse report 3".to_string(),
-                source: "debug_file".to_string(),
-                station_id: Some("station-a".to_string()),
-                details_json: None,
-            },
-        )
-        .expect("insert second log event should succeed");
-
-        link_session_log_events(&connection, &session_id, &[first_log_id, second_log_id])
-            .expect("linking should succeed");
-
-        assert_eq!(
-            count_log_events(&connection).expect("count should succeed"),
-            2
-        );
-        assert_eq!(
-            count_session_log_events(&connection, &session_id).expect("count should succeed"),
-            2
-        );
+        assert_eq!(row.1, event.timestamp);
+        assert_eq!(row.2, event.station);
+        assert_eq!(row.3, event.started);
+        assert_eq!(row.4, event.ended);
+        assert_eq!(row.5, event.kwh);
+        assert_eq!(row.6, event.card_id);
     }
 }

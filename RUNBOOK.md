@@ -90,7 +90,7 @@ sudo journalctl -u keba-home-api-reader -f
 ## Health-Check
 ```bash
 curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8080/diagnostics/db
+curl -s http://127.0.0.1:8080/sessions/carport/latest
 ```
 
 ## Upgrade
