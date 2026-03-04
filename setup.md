@@ -136,6 +136,12 @@ Alle drei Services gemeinsam neu starten:
 bash scripts/restart_services.sh
 ```
 
+Deploy + Restart + Checks am Pi in einem Lauf:
+```bash
+chmod +x scripts/post_deploy_check.sh
+bash scripts/post_deploy_check.sh
+```
+
 Logs:
 ```bash
 sudo journalctl -u keba-home-service@carport -f
