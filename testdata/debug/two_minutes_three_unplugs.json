@@ -1,0 +1,31 @@
+{
+  "loop_forever": false,
+  "report2": [
+    { "ok": { "Plug": 7, "Seconds": 0 } },
+    { "ok": { "Plug": 7, "Seconds": 6 } },
+    { "ok": { "Plug": 7, "Seconds": 12 } },
+
+    { "ok": { "Plug": 0, "Seconds": 18 } },
+    { "ok": { "Plug": 0, "Seconds": 24 } },
+    { "ok": { "Plug": 0, "Seconds": 30 } },
+
+    { "ok": { "Plug": 7, "Seconds": 36 } },
+    { "ok": { "Plug": 7, "Seconds": 42 } },
+    { "ok": { "Plug": 7, "Seconds": 48 } },
+
+    { "ok": { "Plug": 0, "Seconds": 54 } },
+    { "ok": { "Plug": 0, "Seconds": 60 } },
+    { "ok": { "Plug": 0, "Seconds": 66 } },
+
+    { "ok": { "Plug": 7, "Seconds": 72 } },
+    { "ok": { "Plug": 7, "Seconds": 78 } },
+    { "ok": { "Plug": 7, "Seconds": 84 } },
+
+    { "ok": { "Plug": 0, "Seconds": 90 } },
+    { "ok": { "Plug": 0, "Seconds": 96 } },
+    { "ok": { "Plug": 0, "Seconds": 102 } }
+  ],
+  "report3": [
+    { "ok": { "E pres": 0 } }
+  ]
+}

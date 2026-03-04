@@ -485,6 +485,7 @@ mod tests {
     use serde_json::json;
 
     use super::PlugStatusPoller;
+    use crate::adapters::keba_debug_file::KebaDebugFileClient;
     use crate::adapters::keba_udp::{KebaClient, KebaClientError};
     use crate::app::services::SqliteSessionService;
     use crate::test_support::open_test_connection;
@@ -631,6 +632,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
             .expect("unplug count query should succeed");
         assert_eq!(unplug_count, 0);
+    }
+
+    #[test]
+    fn debug_replay_two_minutes_writes_three_unplug_events() {
+        let connection = Arc::new(Mutex::new(open_test_connection("runtime-debug-two-minutes")));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+        let fixture_path = format!(
+            "{}/testdata/debug/two_minutes_three_unplugs.json",
+            env!("CARGO_MANIFEST_DIR").replace('\\', "/")
+        );
+        let debug_client =
+            KebaDebugFileClient::from_file(&fixture_path).expect("debug fixture should load");
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(debug_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        let poll_interval_ms = 100_u64;
+        assert!(poll_interval_ms < 20_000);
+        super::run_debug_replay_loop(&mut poller, poll_interval_ms)
+            .expect("debug replay should finish");
+
+        let db = connection.lock().expect("connection lock should be available");
+        let unplug_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM unplug_log_events", [], |row| row.get(0))
+            .expect("unplug count query should succeed");
+        assert_eq!(unplug_count, 3);
     }
 
 }
