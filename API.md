@@ -2,7 +2,7 @@
 
 All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
 JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`).
-Session endpoints require API key header: `X-API-Key: 1r0m`.
+Session endpoints sind aktuell ohne API-Key erreichbar.
 
 ## `GET /health`
 Health check endpoint.
@@ -25,7 +25,7 @@ The API takes the first report where `started > 0`, `ended > 0` and `E Pres > 0`
 
 Example:
 ```bash
-curl -s -H "X-API-Key: 1r0m" http://localhost:8080/sessions/carport/latest | jq
+curl -s http://localhost:8080/sessions/carport/latest | jq
 ```
 
 Response `200`:
@@ -44,10 +44,35 @@ Same contract as `/sessions/carport/latest`, but for station `entrance`.
 
 Example:
 ```bash
-curl -s -H "X-API-Key: 1r0m" http://localhost:8080/sessions/entrance/latest | jq
+curl -s http://localhost:8080/sessions/entrance/latest | jq
 ```
 
 Response `200`: same JSON shape as above.
+
+## `GET /unplug-log?count={x}`
+Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `timestamp DESC, id DESC`.
+`count` entspricht einem SQL-`LIMIT` (vergleichbar mit `SELECT TOP x ...`) und ist optional.
+
+Beispiele:
+```bash
+curl -s "http://localhost:8080/unplug-log?count=5" | jq
+curl -s "http://localhost:8080/unplug-log" | jq
+```
+
+Response `200`:
+```json
+[
+  {
+    "id": "c8d9b95b-6d73-4f0f-8a51-2dbd1f9f57d8",
+    "timestamp": "2026-03-04 11:00",
+    "station": "Carport",
+    "started": "n/a",
+    "ended": "n/a",
+    "kwh": "0.000",
+    "cardId": "CARD-3"
+  }
+]
+```
 
 ## Error Responses
 
@@ -55,6 +80,13 @@ Response `200`: same JSON shape as above.
 ```json
 {
   "error": "station mapping for 'entrance' is not configured"
+}
+```
+
+`400` (ungueltiger `count` Parameter):
+```json
+{
+  "error": "query parameter 'count' must be >= 1"
 }
 ```
 
@@ -73,12 +105,6 @@ or
 }
 ```
 
-`401` (missing/invalid API key):
-```json
-{
-  "error": "missing or invalid API key"
-}
-```
 Hinweis zu `kWh`:
 - `E Pres` Werte `>= 1000` werden als `0.1 Wh` interpretiert und in kWh umgerechnet (`/10000`).
 - Kleinere Werte werden als bereits in kWh geliefert behandelt.

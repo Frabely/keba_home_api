@@ -73,3 +73,14 @@ pub struct NewUnplugLogRecord {
     pub kwh: String,
     pub card_id: String,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnplugLogRecord {
+    pub id: String,
+    pub timestamp: String,
+    pub station: String,
+    pub started: String,
+    pub ended: String,
+    pub kwh: String,
+    pub card_id: String,
+}

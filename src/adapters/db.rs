@@ -3,6 +3,7 @@ use thiserror::Error;
 
 pub use crate::domain::models::{
     LogEventRecord, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord, SessionRecord,
+    UnplugLogRecord,
 };
 use uuid::Uuid;
 
@@ -523,6 +524,37 @@ pub fn list_recent_log_events(
             source: row.get(5)?,
             station_id: row.get(6)?,
             details_json: row.get(7)?,
+        })
+    })?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+
+    Ok(events)
+}
+
+pub fn list_recent_unplug_log_events(
+    connection: &Connection,
+    limit: u32,
+) -> Result<Vec<UnplugLogRecord>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT id, timestamp, station, started, ended, kwh, card_id
+         FROM unplug_log_events
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?1",
+    )?;
+
+    let rows = statement.query_map(params![i64::from(limit)], |row| {
+        Ok(UnplugLogRecord {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            station: row.get(2)?,
+            started: row.get(3)?,
+            ended: row.get(4)?,
+            kwh: row.get(5)?,
+            card_id: row.get(6)?,
         })
     })?;
 

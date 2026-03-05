@@ -95,6 +95,7 @@ Wichtig:
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-eingang.env` auf die Eingang-Wallbox-IP.
 - `POLL_INTERVAL_MS` Default fuer Writer ist `20000` (20 Sekunden), falls der Wert in der ENV nicht gesetzt ist.
 - Fuer die API-Endpunkte `GET /sessions/carport/latest` und `GET /sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
+- Die API-Endpunkte sind aktuell ohne API-Key erreichbar; Zugriff nach aussen nur mit Netzwerkschutz (Firewall, Reverse Proxy, VPN) freigeben.
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash

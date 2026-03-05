@@ -7,6 +7,7 @@ use crate::adapters::db;
 use crate::adapters::db::DbError;
 use crate::domain::models::{
     LogEventRecord, NewLogEventRecord, NewSessionRecord, NewUnplugLogRecord, SessionRecord,
+    UnplugLogRecord,
 };
 
 #[derive(Debug, Error)]
@@ -28,6 +29,10 @@ pub trait SessionQueryHandler {
     fn count_sessions(&self) -> Result<i64, ServiceError>;
     fn count_log_events(&self) -> Result<i64, ServiceError>;
     fn list_recent_log_events(&self, limit: u32) -> Result<Vec<LogEventRecord>, ServiceError>;
+    fn list_recent_unplug_log_events(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<UnplugLogRecord>, ServiceError>;
 }
 
 pub trait SessionCommandHandler {
@@ -96,6 +101,13 @@ impl SessionQueryHandler for SqliteSessionService {
 
     fn list_recent_log_events(&self, limit: u32) -> Result<Vec<LogEventRecord>, ServiceError> {
         self.with_connection(|connection| db::list_recent_log_events(connection, limit))
+    }
+
+    fn list_recent_unplug_log_events(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<UnplugLogRecord>, ServiceError> {
+        self.with_connection(|connection| db::list_recent_unplug_log_events(connection, limit))
     }
 }
 
