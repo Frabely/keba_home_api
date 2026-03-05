@@ -37,7 +37,6 @@ const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 6;
 #[cfg(test)]
 const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 1;
 const UNPLUG_DETAILS_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-const MIN_SIGNIFICANT_SESSION_KWH: f64 = 0.05;
 
 pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
@@ -136,13 +135,13 @@ impl PlugStatusPoller {
         let disconnected_at_ms = Utc::now().timestamp_millis();
         let details = self.fetch_unplug_details(disconnected_at_ms);
         tracing::info!(
-            "Zeitstempel: {} | Ladestation: {} | Status: {} | Start: {} | Ende: {} | kWh: {} | CardId: {}",
+            "Zeitstempel: {} | Ladestation: {} | Status: {} | Start: {} | Ende: {} | Wh: {} | CardId: {}",
             timestamp,
             self.station_label,
             status,
             details.started,
             details.ended,
-            details.kwh,
+            details.wh,
             details.card_id
         );
         let event = NewUnplugLogRecord {
@@ -150,7 +149,7 @@ impl PlugStatusPoller {
             station: self.station_label.clone(),
             started: details.started,
             ended: details.ended,
-            kwh: details.kwh,
+            wh: details.wh,
             card_id: details.card_id,
         };
         if let Err(error) = self.session_commands.insert_unplug_log_event(&event) {
@@ -222,7 +221,7 @@ impl PlugStatusPoller {
 struct UnplugLogDetails {
     started: String,
     ended: String,
-    kwh: String,
+    wh: String,
     card_id: String,
 }
 
@@ -231,13 +230,13 @@ impl UnplugLogDetails {
         Self {
             started: "n/a".to_string(),
             ended: "n/a".to_string(),
-            kwh: "n/a".to_string(),
+            wh: "n/a".to_string(),
             card_id: "n/a".to_string(),
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.started != "n/a" && self.ended != "n/a" && self.kwh != "n/a"
+        self.started != "n/a" && self.ended != "n/a" && self.wh != "n/a"
     }
 }
 
@@ -245,7 +244,7 @@ fn extract_unplug_details_from_report(
     report: &serde_json::Map<String, Value>,
     disconnected_at_ms: i64,
 ) -> UnplugLogDetails {
-    let kwh_value = parse_session_kwh_from_report(report);
+    let wh_value = parse_session_wh_from_report(report);
 
     let started_ms = parse_session_timestamp_ms_from_object(
         report,
@@ -283,15 +282,15 @@ fn extract_unplug_details_from_report(
     .map(stringify_value)
     .unwrap_or_else(|| "n/a".to_string());
 
-    if let (Some(started), Some(ended), Some(kwh)) = (started_ms, ended_ms, kwh_value)
+    if let (Some(started), Some(ended), Some(wh)) = (started_ms, ended_ms, wh_value)
         && started > 0
         && ended >= started
-        && kwh >= 0.0
+        && wh >= 0.0
     {
         return UnplugLogDetails {
             started: format_ts(started),
             ended: format_ts(ended),
-            kwh: format!("{kwh:.3}"),
+            wh: format!("{wh:.1}"),
             card_id,
         };
     }
@@ -346,24 +345,16 @@ fn parse_numeric_text(text: &str) -> Option<f64> {
     trimmed.replace(',', ".").parse::<f64>().ok()
 }
 
-fn parse_session_kwh_from_report(report: &serde_json::Map<String, Value>) -> Option<f64> {
-    if let Some(kwh) = find_value(report, &["Energy Session", "energy_present_session"])
+fn parse_session_wh_from_report(report: &serde_json::Map<String, Value>) -> Option<f64> {
+    if let Some(wh) = find_value(report, &["Energy Session", "energy_present_session"])
         .and_then(parse_f64)
     {
-        return Some(clamp_small_session_kwh_to_zero(kwh));
+        return Some(wh);
     }
 
     find_value(report, &["E Pres", "E pres"])
         .and_then(parse_f64)
-        .map(|value| clamp_small_session_kwh_to_zero(value / 10_000.0))
-}
-
-fn clamp_small_session_kwh_to_zero(kwh: f64) -> f64 {
-    if kwh.abs() < MIN_SIGNIFICANT_SESSION_KWH {
-        0.0
-    } else {
-        kwh
-    }
+        .map(|value| value / 10.0)
 }
 
 fn stringify_value(value: &Value) -> String {
@@ -736,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_unplug_details_converts_e_pres_thousands_string_to_kwh() {
+    fn extract_unplug_details_converts_e_pres_thousands_string_to_wh() {
         let report = json!({
             "E Pres": "285,000",
             "started": "2026-03-04 17:01:00.000",
@@ -752,12 +743,12 @@ mod tests {
 
         let details = super::extract_unplug_details_from_report(report_obj, disconnected_at_ms);
 
-        assert_eq!(details.kwh, "28.500");
+        assert_eq!(details.wh, "28500.0");
         assert_eq!(details.card_id, "C1");
     }
 
     #[test]
-    fn extract_unplug_details_clamps_small_e_pres_to_zero() {
+    fn extract_unplug_details_converts_small_e_pres_to_wh() {
         let report = json!({
             "E Pres": 285,
             "started": "2026-03-04 17:01:00.000",
@@ -773,7 +764,7 @@ mod tests {
 
         let details = super::extract_unplug_details_from_report(report_obj, disconnected_at_ms);
 
-        assert_eq!(details.kwh, "0.000");
+        assert_eq!(details.wh, "28.5");
         assert_eq!(details.card_id, "C2");
     }
 
@@ -874,13 +865,13 @@ mod tests {
             .expect("connection lock should be available");
         let row: (String, String) = db
             .query_row(
-                "SELECT kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                "SELECT Wh, CardId FROM unplug_log_events ORDER BY Timestamp DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("inserted unplug event should be readable");
 
-        assert_eq!(row.0, "8.116");
+        assert_eq!(row.0, "8115.9");
         assert_eq!(row.1, "BOOT1");
     }
 
@@ -943,7 +934,7 @@ mod tests {
             .expect("connection lock should be available");
         let row: (String, String, String, String) = db
             .query_row(
-                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                "SELECT Started, Ended, Wh, CardId FROM unplug_log_events ORDER BY Timestamp DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -951,7 +942,7 @@ mod tests {
 
         assert_eq!(row.0, "2026-03-01 16:40");
         assert_eq!(row.1, "2026-03-02 04:01");
-        assert_eq!(row.2, "0.000");
+        assert_eq!(row.2, "0.0");
         assert_eq!(row.3, "R101");
     }
 
@@ -1006,13 +997,13 @@ mod tests {
             .expect("connection lock should be available");
         let row: (String, String, String, String) = db
             .query_row(
-                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                "SELECT Started, Ended, Wh, CardId FROM unplug_log_events ORDER BY Timestamp DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("inserted unplug event should be readable");
 
-        assert_eq!(row.2, "6.540");
+        assert_eq!(row.2, "6540.0");
         assert_eq!(row.3, "R101");
     }
 
@@ -1058,7 +1049,7 @@ mod tests {
             .expect("connection lock should be available");
         let row: (String, String, String, String) = db
             .query_row(
-                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                "SELECT Started, Ended, Wh, CardId FROM unplug_log_events ORDER BY Timestamp DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -1118,7 +1109,7 @@ mod tests {
             .expect("connection lock should be available");
         let row: (String, String, String, String) = db
             .query_row(
-                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                "SELECT Started, Ended, Wh, CardId FROM unplug_log_events ORDER BY Timestamp DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -1126,7 +1117,7 @@ mod tests {
 
         assert_eq!(row.0, "2026-03-04 15:41");
         assert_eq!(row.1, "2026-03-05 07:29");
-        assert_eq!(row.2, "0.000");
+        assert_eq!(row.2, "0.0");
         assert_eq!(row.3, "RZERO");
     }
 

@@ -6,8 +6,6 @@ use serde_json::Value;
 use crate::adapters::keba_udp::KebaUdpClient;
 use crate::app::services::{SessionQueryHandler, SqliteSessionService};
 
-const MIN_SIGNIFICANT_SESSION_KWH: f64 = 0.05;
-
 #[derive(Clone)]
 pub struct ApiState {
     pub report100_stations: Vec<Report100Station>,
@@ -45,13 +43,19 @@ pub struct UnplugLogQuery {
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct UnplugLogResponse {
+    #[serde(rename = "Id")]
     pub id: String,
+    #[serde(rename = "Timestamp")]
     pub timestamp: String,
+    #[serde(rename = "Station")]
     pub station: String,
+    #[serde(rename = "Started")]
     pub started: String,
+    #[serde(rename = "Ended")]
     pub ended: String,
-    pub kwh: String,
-    #[serde(rename = "cardId")]
+    #[serde(rename = "Wh")]
+    pub wh: String,
+    #[serde(rename = "CardId")]
     pub card_id: String,
 }
 
@@ -113,7 +117,7 @@ async fn get_unplug_log_events_endpoint(
                     station: entry.station,
                     started: entry.started,
                     ended: entry.ended,
-                    kwh: entry.kwh,
+                    wh: entry.wh,
                     card_id: entry.card_id,
                 })
                 .collect::<Vec<_>>(),
@@ -177,7 +181,7 @@ fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpRespon
     }
 
     let mut error_message =
-        "reports 100-130 do not contain started/end timestamps and E Pres > 0".to_string();
+        "reports 100-130 do not contain started/end timestamps and E Pres >= 0".to_string();
     if let Some(fetch_error) = last_fetch_error {
         error_message.push_str(&format!(" (last error: {fetch_error})"));
     }
@@ -253,19 +257,11 @@ fn extract_latest_station_session_view(
 fn parse_session_kwh_from_object(object: &serde_json::Map<String, Value>) -> Option<f64> {
     if let Some(kwh) = find_number_from_object(object, &["Energy Session", "energy_present_session"])
     {
-        return Some(clamp_small_session_kwh_to_zero(kwh));
+        return Some(kwh);
     }
 
     find_number_from_object(object, &["E Pres", "E pres"])
-        .map(|value| clamp_small_session_kwh_to_zero(value / 10_000.0))
-}
-
-fn clamp_small_session_kwh_to_zero(kwh: f64) -> f64 {
-    if kwh.abs() < MIN_SIGNIFICANT_SESSION_KWH {
-        0.0
-    } else {
-        kwh
-    }
+        .map(|value| value / 10.0)
 }
 
 fn find_value_from_object<'a>(
@@ -453,7 +449,7 @@ mod tests {
 
         let parsed = super::parse_session_kwh_from_object(object);
 
-        assert_eq!(parsed, Some(28.5));
+        assert_eq!(parsed, Some(28500.0));
     }
 
     #[actix_web::test]
@@ -469,7 +465,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn parse_session_kwh_from_object_clamps_small_e_pres_to_zero() {
+    async fn parse_session_kwh_from_object_converts_small_e_pres_to_kwh() {
         let payload = json!({ "E Pres": 285 });
         let object = payload
             .as_object()
@@ -477,7 +473,7 @@ mod tests {
 
         let parsed = super::parse_session_kwh_from_object(object);
 
-        assert_eq!(parsed, Some(0.0));
+        assert_eq!(parsed, Some(28.5));
     }
 
     #[actix_web::test]
@@ -523,7 +519,7 @@ mod tests {
                 station: "Carport".to_string(),
                 started: "2026-03-04 08:00".to_string(),
                 ended: "2026-03-04 09:00".to_string(),
-                kwh: "3.200".to_string(),
+                wh: "3200.0".to_string(),
                 card_id: "CARD-1".to_string(),
             })
             .expect("first insert should succeed");
@@ -533,7 +529,7 @@ mod tests {
                 station: "Entrance".to_string(),
                 started: "2026-03-04 09:30".to_string(),
                 ended: "2026-03-04 10:00".to_string(),
-                kwh: "0.000".to_string(),
+                wh: "0.0".to_string(),
                 card_id: "CARD-2".to_string(),
             })
             .expect("second insert should succeed");
@@ -543,7 +539,7 @@ mod tests {
                 station: "Carport".to_string(),
                 started: "n/a".to_string(),
                 ended: "n/a".to_string(),
-                kwh: "0.000".to_string(),
+                wh: "0.0".to_string(),
                 card_id: "CARD-3".to_string(),
             })
             .expect("third insert should succeed");
@@ -566,10 +562,10 @@ mod tests {
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
         assert_eq!(json.as_array().map(std::vec::Vec::len), Some(2));
-        assert_eq!(json[0]["timestamp"], "2026-03-04 11:00");
-        assert_eq!(json[0]["cardId"], "CARD-3");
-        assert_eq!(json[1]["timestamp"], "2026-03-04 10:00");
-        assert_eq!(json[1]["cardId"], "CARD-2");
+        assert_eq!(json[0]["Timestamp"], "2026-03-04 11:00");
+        assert_eq!(json[0]["CardId"], "CARD-3");
+        assert_eq!(json[1]["Timestamp"], "2026-03-04 10:00");
+        assert_eq!(json[1]["CardId"], "CARD-2");
     }
 
     #[actix_web::test]
@@ -652,7 +648,7 @@ mod tests {
         let expected_ended =
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
-        assert_eq!(json["kWh"], 12.34);
+        assert_eq!(json["kWh"], 12340.0);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
@@ -748,7 +744,7 @@ mod tests {
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
 
-        assert_eq!(json["kWh"], 6.5432);
+        assert_eq!(json["kWh"], 6543.2);
         assert_eq!(json["reportId"], 101);
         assert_eq!(json["CardId"], "E101");
 
@@ -830,7 +826,7 @@ mod tests {
         let expected_ended =
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
-        assert_eq!(json["kWh"], 7.65);
+        assert_eq!(json["kWh"], 7650.0);
         assert_eq!(json["reportId"], 101);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
@@ -910,7 +906,7 @@ mod tests {
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
 
-        assert_eq!(json["kWh"], 8.91);
+        assert_eq!(json["kWh"], 8910.0);
         assert_eq!(json["reportId"], 101);
         assert_eq!(json["CardId"], "ABC101");
 
@@ -1183,7 +1179,7 @@ mod tests {
         let ended = json["ended"].as_i64().expect("ended should be i64");
         assert!(started >= expected_started_min && started <= expected_started_max);
         assert!(ended >= expected_ended_min && ended <= expected_ended_max);
-        assert_eq!(json["kWh"], 4.2);
+        assert_eq!(json["kWh"], 4200.0);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "REL1");
 
@@ -1275,7 +1271,7 @@ mod tests {
         let ended = json["ended"].as_i64().expect("ended should be i64");
         assert!(started >= expected_started_min && started <= expected_started_max);
         assert!(ended >= expected_ended_min && ended <= expected_ended_max);
-        assert_eq!(json["kWh"], 4.2);
+        assert_eq!(json["kWh"], 4200.0);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "REL2");
 
@@ -1345,7 +1341,7 @@ mod tests {
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["kWh"], 8.1984);
+        assert_eq!(json["kWh"], 8198.4);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "WH1");
 
@@ -1434,7 +1430,7 @@ mod tests {
         let ended = json["ended"].as_i64().expect("ended should be i64");
         assert!(started >= expected_started_min && started <= expected_started_max);
         assert!(ended >= expected_ended_min && ended <= expected_ended_max);
-        assert_eq!(json["kWh"], 2.0064);
+        assert_eq!(json["kWh"], 2006.4);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC1");
 
@@ -1506,7 +1502,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
         assert_eq!(json["started"], 1_772_546_661_000_i64);
         assert_eq!(json["ended"], 1_772_605_949_000_i64);
-        assert_eq!(json["kWh"], 8.1984);
+        assert_eq!(json["kWh"], 8198.4);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC2");
 

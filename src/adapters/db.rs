@@ -7,7 +7,7 @@ pub use crate::domain::models::{
 };
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 8;
+pub const LATEST_SCHEMA_VERSION: u32 = 9;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (
@@ -300,6 +300,40 @@ DROP TABLE IF EXISTS log_events;
 DROP TABLE IF EXISTS charging_sessions;
 "#,
     ),
+    (
+        9,
+        r#"
+CREATE TABLE IF NOT EXISTS unplug_log_events_v2 (
+    Id TEXT PRIMARY KEY,
+    Timestamp TEXT NOT NULL,
+    Station TEXT NOT NULL,
+    Started TEXT NOT NULL,
+    Ended TEXT NOT NULL,
+    Wh TEXT NOT NULL,
+    CardId TEXT NOT NULL
+);
+
+INSERT INTO unplug_log_events_v2 (Id, Timestamp, Station, Started, Ended, Wh, CardId)
+SELECT
+    id,
+    timestamp,
+    station,
+    started,
+    ended,
+    CASE
+        WHEN lower(trim(kwh)) = 'n/a' THEN 'n/a'
+        ELSE printf('%.1f', CAST(replace(kwh, ',', '.') AS REAL) * 1000.0)
+    END,
+    card_id
+FROM unplug_log_events;
+
+DROP TABLE unplug_log_events;
+ALTER TABLE unplug_log_events_v2 RENAME TO unplug_log_events;
+
+CREATE INDEX IF NOT EXISTS idx_unplug_log_events_timestamp_desc
+ON unplug_log_events (Timestamp DESC, Id DESC);
+"#,
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -449,7 +483,7 @@ pub fn insert_unplug_log_event(
     let id = Uuid::new_v4().to_string();
     connection.execute(
         "INSERT INTO unplug_log_events (
-            id, timestamp, station, started, ended, kwh, card_id
+            Id, Timestamp, Station, Started, Ended, Wh, CardId
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             id,
@@ -457,7 +491,7 @@ pub fn insert_unplug_log_event(
             new_event.station,
             new_event.started,
             new_event.ended,
-            new_event.kwh,
+            new_event.wh,
             new_event.card_id,
         ],
     )?;
@@ -540,9 +574,9 @@ pub fn list_recent_unplug_log_events(
     limit: u32,
 ) -> Result<Vec<UnplugLogRecord>, DbError> {
     let mut statement = connection.prepare(
-        "SELECT id, timestamp, station, started, ended, kwh, card_id
+        "SELECT Id, Timestamp, Station, Started, Ended, Wh, CardId
          FROM unplug_log_events
-         ORDER BY timestamp DESC, id DESC
+         ORDER BY Timestamp DESC, Id DESC
          LIMIT ?1",
     )?;
 
@@ -553,7 +587,7 @@ pub fn list_recent_unplug_log_events(
             station: row.get(2)?,
             started: row.get(3)?,
             ended: row.get(4)?,
-            kwh: row.get(5)?,
+            wh: row.get(5)?,
             card_id: row.get(6)?,
         })
     })?;
@@ -770,7 +804,7 @@ mod tests {
             station: "Carport".to_string(),
             started: "2026-02-20 20:10".to_string(),
             ended: "2026-02-20 21:49".to_string(),
-            kwh: "12.345".to_string(),
+            wh: "12.3".to_string(),
             card_id: "ABC123".to_string(),
         };
 
@@ -778,7 +812,7 @@ mod tests {
 
         let row: (String, String, String, String, String, String, String) = connection
             .query_row(
-                "SELECT id, timestamp, station, started, ended, kwh, card_id FROM unplug_log_events WHERE id = ?1",
+                "SELECT Id, Timestamp, Station, Started, Ended, Wh, CardId FROM unplug_log_events WHERE Id = ?1",
                 params![id],
                 |row| {
                     Ok((
@@ -798,7 +832,7 @@ mod tests {
         assert_eq!(row.2, event.station);
         assert_eq!(row.3, event.started);
         assert_eq!(row.4, event.ended);
-        assert_eq!(row.5, event.kwh);
+        assert_eq!(row.5, event.wh);
         assert_eq!(row.6, event.card_id);
     }
 }

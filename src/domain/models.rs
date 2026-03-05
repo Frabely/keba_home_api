@@ -70,7 +70,7 @@ pub struct NewUnplugLogRecord {
     pub station: String,
     pub started: String,
     pub ended: String,
-    pub kwh: String,
+    pub wh: String,
     pub card_id: String,
 }
 
@@ -81,6 +81,6 @@ pub struct UnplugLogRecord {
     pub station: String,
     pub started: String,
     pub ended: String,
-    pub kwh: String,
+    pub wh: String,
     pub card_id: String,
 }

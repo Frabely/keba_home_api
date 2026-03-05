@@ -158,7 +158,8 @@ Log-Verhalten (Default `RUST_LOG=info`):
 - `INFO`: Startup + Zustandsaenderungen + Session-Lifecycle + Heartbeat (standardmaessig 1x/Minute via `STATUS_LOG_INTERVAL_SECONDS=60`)
 - `WARN/ERROR`: sofort bei Problemen
 - `DEBUG`: detaillierte Poll-/Request-Details nur bei aktivem Debug-Level
-- Unplug-Logfelder `started`/`ended` werden minutengenau (`YYYY-MM-DD HH:MM`) formatiert.
+- Unplug-Logfelder `Started`/`Ended` werden minutengenau (`YYYY-MM-DD HH:MM`) formatiert.
+- Unplug-Logfeld `Wh` wird mit genau einer Nachkommastelle gespeichert (`x.y`).
 - `LOG_FORMAT` steuert die Ausgabeform:
   - `compact` (Default, empfohlen fuer Konsole/Journal)
   - `pretty` (mehrzeilig, human-readable)
@@ -318,6 +319,7 @@ sudo systemctl start keba-home-api-reader
 - IP/Port/KEBA-Erreichbarkeit pruefen.
 - Auf `poller tick failed` Warnungen achten (zeigen Fetch/Parse-Probleme von `report 2` direkt im Log). Wiederholte Fehler werden gebuendelt, damit Zustandswechsel-Logs sichtbar bleiben.
 - `unplug_log_events`-Insert passiert beim debouncten Uebergang `vehicleConnected true -> false` (Abstecken).
+- Persistenzschema fuer `unplug_log_events`: `Id`, `Timestamp`, `Station`, `Started`, `Ended`, `Wh`, `CardId`.
 - Fuer UDP-`Plug`-Werte gilt: `>=5` bedeutet Fahrzeug verbunden (`5/7`), `0/1/3` gilt als nicht fahrzeugverbunden. Damit wird bei festen Kabeln ein Wechsel `7 -> 3` korrekt als Abstecken erkannt.
 - Der Wechsel wird erst nach `DEBOUNCE_SAMPLES` gleichen Polls (Default `3`) bestaetigt; ohne bestaetigten Zustandswechsel wird kein neuer Unplug-Eintrag angelegt.
 - Beim Service-Start wird der initiale stabile Plug-Status direkt uebernommen. Startet der Service bei bereits verbundenem Fahrzeug, bleibt der interne Zustand sofort `true` und ein spaeteres Abziehen kann ohne vorheriges Zwischen-Event korrekt persistiert werden.

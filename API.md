@@ -1,7 +1,7 @@
 # API Contract
 
 All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
-JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`).
+JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`) and `/unplug-log` response fields (`Id`, `Timestamp`, `Station`, `Started`, `Ended`, `Wh`, `CardId`).
 Session endpoints sind aktuell ohne API-Key erreichbar.
 
 ## `GET /health`
@@ -21,7 +21,7 @@ Response `200`:
 
 ## `GET /sessions/carport/latest`
 Fetch latest session view from KEBA `report 100..130`.  
-The API takes the first report where `started > 0`, `ended > 0` and `E Pres > 0`.
+The API takes the first report where `started > 0`, `ended > 0` and `E Pres >= 0`.
 
 Example:
 ```bash
@@ -50,7 +50,7 @@ curl -s http://localhost:8080/sessions/entrance/latest | jq
 Response `200`: same JSON shape as above.
 
 ## `GET /unplug-log?count={x}`
-Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `timestamp DESC, id DESC`.
+Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp DESC, Id DESC`.
 `count` entspricht einem SQL-`LIMIT` (vergleichbar mit `SELECT TOP x ...`) und ist optional.
 
 Beispiele:
@@ -63,13 +63,13 @@ Response `200`:
 ```json
 [
   {
-    "id": "c8d9b95b-6d73-4f0f-8a51-2dbd1f9f57d8",
-    "timestamp": "2026-03-04 11:00",
-    "station": "Carport",
-    "started": "n/a",
-    "ended": "n/a",
-    "kwh": "0.000",
-    "cardId": "CARD-3"
+    "Id": "c8d9b95b-6d73-4f0f-8a51-2dbd1f9f57d8",
+    "Timestamp": "2026-03-04 11:00",
+    "Station": "Carport",
+    "Started": "n/a",
+    "Ended": "n/a",
+    "Wh": "0.0",
+    "CardId": "CARD-3"
   }
 ]
 ```
@@ -101,10 +101,6 @@ or
 
 ```json
 {
-  "error": "reports 100-130 do not contain started/end timestamps and E Pres > 0"
+  "error": "reports 100-130 do not contain started/end timestamps and E Pres >= 0"
 }
 ```
-
-Hinweis zu `kWh`:
-- `E Pres` Werte `>= 1000` werden als `0.1 Wh` interpretiert und in kWh umgerechnet (`/10000`).
-- Kleinere Werte werden als bereits in kWh geliefert behandelt.
