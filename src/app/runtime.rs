@@ -37,6 +37,7 @@ const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 6;
 #[cfg(test)]
 const UNPLUG_DETAILS_RETRY_ATTEMPTS: usize = 1;
 const UNPLUG_DETAILS_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const MIN_SIGNIFICANT_SESSION_KWH: f64 = 0.05;
 
 pub struct PlugStatusPoller {
     client: Box<dyn KebaClient>,
@@ -160,7 +161,7 @@ impl PlugStatusPoller {
     fn fetch_unplug_details(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
         for attempt in 1..=UNPLUG_DETAILS_RETRY_ATTEMPTS {
             let details = self.fetch_unplug_details_once(disconnected_at_ms);
-            if details.is_complete() || details.is_zero_kwh() {
+            if details.is_complete() {
                 if attempt > 1 {
                     tracing::info!(
                         attempt,
@@ -189,7 +190,6 @@ impl PlugStatusPoller {
     fn fetch_unplug_details_once(&self, disconnected_at_ms: i64) -> UnplugLogDetails {
         const REPORT_SEARCH_START: u16 = 100;
         const REPORT_SEARCH_END: u16 = 130;
-        let mut zero_kwh_fallback: Option<UnplugLogDetails> = None;
 
         for report_id in REPORT_SEARCH_START..=REPORT_SEARCH_END {
             let payload = match self.client.get_report(report_id) {
@@ -213,12 +213,9 @@ impl PlugStatusPoller {
             if details.is_complete() {
                 return details;
             }
-            if zero_kwh_fallback.is_none() && details.is_zero_kwh() {
-                zero_kwh_fallback = Some(details);
-            }
         }
 
-        zero_kwh_fallback.unwrap_or_else(UnplugLogDetails::na)
+        UnplugLogDetails::na()
     }
 }
 
@@ -242,27 +239,13 @@ impl UnplugLogDetails {
     fn is_complete(&self) -> bool {
         self.started != "n/a" && self.ended != "n/a" && self.kwh != "n/a"
     }
-
-    fn is_zero_kwh(&self) -> bool {
-        self.kwh == "0.000"
-    }
 }
 
 fn extract_unplug_details_from_report(
     report: &serde_json::Map<String, Value>,
     disconnected_at_ms: i64,
 ) -> UnplugLogDetails {
-    let kwh_value = find_value(
-        report,
-        &[
-            "E Pres",
-            "E pres",
-            "Energy Session",
-            "energy_present_session",
-        ],
-    )
-    .and_then(parse_f64)
-    .map(normalize_session_kwh);
+    let kwh_value = parse_session_kwh_from_report(report);
 
     let started_ms = parse_session_timestamp_ms_from_object(
         report,
@@ -303,23 +286,12 @@ fn extract_unplug_details_from_report(
     if let (Some(started), Some(ended), Some(kwh)) = (started_ms, ended_ms, kwh_value)
         && started > 0
         && ended >= started
-        && kwh > 0.0
+        && kwh >= 0.0
     {
         return UnplugLogDetails {
             started: format_ts(started),
             ended: format_ts(ended),
             kwh: format!("{kwh:.3}"),
-            card_id,
-        };
-    }
-
-    if let Some(kwh) = kwh_value
-        && kwh == 0.0
-    {
-        return UnplugLogDetails {
-            started: "n/a".to_string(),
-            ended: "n/a".to_string(),
-            kwh: "0.000".to_string(),
             card_id,
         };
     }
@@ -344,16 +316,53 @@ fn find_value<'a>(
 fn parse_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
+        Value::String(text) => parse_numeric_text(text),
         _ => None,
     }
 }
 
-fn normalize_session_kwh(raw_energy: f64) -> f64 {
-    if raw_energy >= 1000.0 {
-        raw_energy / 10_000.0
+fn parse_numeric_text(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains(',') && !trimmed.contains('.') {
+        let mut parts = trimmed.split(',');
+        let head = parts.next()?;
+        let tail = parts.next()?;
+        let has_more_parts = parts.next().is_some();
+        let head_digits = head.trim_start_matches('-');
+        let comma_looks_like_thousands_separator = !has_more_parts
+            && head_digits.len() >= 3
+            && head_digits.chars().all(|char| char.is_ascii_digit())
+            && tail.len() == 3
+            && tail.chars().all(|char| char.is_ascii_digit());
+        if comma_looks_like_thousands_separator {
+            return trimmed.replace(',', "").parse::<f64>().ok();
+        }
+    }
+
+    trimmed.replace(',', ".").parse::<f64>().ok()
+}
+
+fn parse_session_kwh_from_report(report: &serde_json::Map<String, Value>) -> Option<f64> {
+    if let Some(kwh) = find_value(report, &["Energy Session", "energy_present_session"])
+        .and_then(parse_f64)
+    {
+        return Some(clamp_small_session_kwh_to_zero(kwh));
+    }
+
+    find_value(report, &["E Pres", "E pres"])
+        .and_then(parse_f64)
+        .map(|value| clamp_small_session_kwh_to_zero(value / 10_000.0))
+}
+
+fn clamp_small_session_kwh_to_zero(kwh: f64) -> f64 {
+    if kwh.abs() < MIN_SIGNIFICANT_SESSION_KWH {
+        0.0
     } else {
-        raw_energy
+        kwh
     }
 }
 
@@ -459,6 +468,7 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
+        session_query_service: Some(session_service.clone()),
     };
 
     let poller = build_poller(&config, session_service.clone())?;
@@ -497,8 +507,11 @@ pub fn run_service(config: AppConfig) -> Result<(), AppError> {
 }
 
 pub fn run_api(config: AppConfig) -> Result<(), AppError> {
+    let connection = open_shared_connection_writer(&config.db_path)?;
+    let session_query_service = SqliteSessionService::new(connection);
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
+        session_query_service: Some(session_query_service),
     };
 
     run_http_server(&config.http_bind, api_state)
@@ -723,6 +736,48 @@ mod tests {
     }
 
     #[test]
+    fn extract_unplug_details_converts_e_pres_thousands_string_to_kwh() {
+        let report = json!({
+            "E Pres": "285,000",
+            "started": "2026-03-04 17:01:00.000",
+            "ended": "2026-03-05 05:29:00.000",
+            "RFID tag": "C1"
+        });
+        let report_obj = report
+            .as_object()
+            .expect("report fixture should be an object");
+        let disconnected_at_ms = chrono::DateTime::parse_from_rfc3339("2026-03-05T05:29:00Z")
+            .expect("timestamp fixture should parse")
+            .timestamp_millis();
+
+        let details = super::extract_unplug_details_from_report(report_obj, disconnected_at_ms);
+
+        assert_eq!(details.kwh, "28.500");
+        assert_eq!(details.card_id, "C1");
+    }
+
+    #[test]
+    fn extract_unplug_details_clamps_small_e_pres_to_zero() {
+        let report = json!({
+            "E Pres": 285,
+            "started": "2026-03-04 17:01:00.000",
+            "ended": "2026-03-05 05:29:00.000",
+            "RFID tag": "C2"
+        });
+        let report_obj = report
+            .as_object()
+            .expect("report fixture should be an object");
+        let disconnected_at_ms = chrono::DateTime::parse_from_rfc3339("2026-03-05T05:29:00Z")
+            .expect("timestamp fixture should parse")
+            .timestamp_millis();
+
+        let details = super::extract_unplug_details_from_report(report_obj, disconnected_at_ms);
+
+        assert_eq!(details.kwh, "0.000");
+        assert_eq!(details.card_id, "C2");
+    }
+
+    #[test]
     fn unplug_transition_persists_unplug_event_only() {
         let connection = Arc::new(Mutex::new(open_test_connection("runtime-session-persist")));
         let session_service = SqliteSessionService::new(Arc::clone(&connection));
@@ -799,7 +854,7 @@ mod tests {
         .with_1xx_reports(vec![
             (
                 100,
-                json!({"E Pres": 8.1159, "Sec": 197769, "started[s]": 191012, "ended[s]": 197682, "RFID tag": "BOOT1"}),
+                json!({"E Pres": 81159, "Sec": 197769, "started[s]": 191012, "ended[s]": 197682, "RFID tag": "BOOT1"}),
             ),
         ]);
 
@@ -856,7 +911,7 @@ mod tests {
         .with_1xx_reports(vec![
             (
                 100,
-                json!({"E Pres": 4.2, "started": "2026-03-01 16:40:19.000", "ended": 0, "RFID tag": "R100"}),
+                json!({"E Pres": 42000, "started": "2026-03-01 16:40:19.000", "ended": 0, "RFID tag": "R100"}),
             ),
             (
                 101,
@@ -864,11 +919,11 @@ mod tests {
             ),
             (
                 102,
-                json!({"E Pres": 1.23, "started": null, "ended": "2026-03-02 04:01:59.000", "RFID tag": "R102"}),
+                json!({"E Pres": 12300, "started": null, "ended": "2026-03-02 04:01:59.000", "RFID tag": "R102"}),
             ),
             (
                 103,
-                json!({"E Pres": 6.54, "started": "2026-03-01 16:40:19.000", "ended": "2026-03-02 04:01:59.000", "RFID tag": "R103"}),
+                json!({"E Pres": 65400, "started": "2026-03-01 16:40:19.000", "ended": "2026-03-02 04:01:59.000", "RFID tag": "R103"}),
             ),
         ]);
 
@@ -896,8 +951,8 @@ mod tests {
 
         assert_eq!(row.0, "2026-03-01 16:40");
         assert_eq!(row.1, "2026-03-02 04:01");
-        assert_eq!(row.2, "6.540");
-        assert_eq!(row.3, "R103");
+        assert_eq!(row.2, "0.000");
+        assert_eq!(row.3, "R101");
     }
 
     #[test]
@@ -927,11 +982,11 @@ mod tests {
         .with_1xx_reports(vec![
             (
                 100,
-                json!({"E Pres": 7.1077, "Sec": 195395, "started[s]": 191012, "ended[s]": 0, "started": "191012000", "ended": "0", "RFID tag": "R100"}),
+                json!({"E Pres": 71077, "Sec": 195395, "started[s]": 191012, "ended[s]": 0, "started": "191012000", "ended": "0", "RFID tag": "R100"}),
             ),
             (
                 101,
-                json!({"E Pres": 6.54, "Sec": 195395, "started[s]": 182170, "ended[s]": 184901, "RFID tag": "R101"}),
+                json!({"E Pres": 65400, "Sec": 195395, "started[s]": 182170, "ended[s]": 184901, "RFID tag": "R101"}),
             ),
         ]);
 
@@ -962,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn unplug_transition_persists_zero_kwh_when_only_zero_session_energy_is_available() {
+    fn unplug_transition_requires_complete_timestamps_even_for_zero_kwh() {
         let connection = Arc::new(Mutex::new(open_test_connection(
             "runtime-unplug-report-1xx-zero-fallback",
         )));
@@ -984,7 +1039,7 @@ mod tests {
         )
         .with_1xx_reports(vec![(
             100,
-            json!({"E Pres": 0.0, "ended[s]": 0, "RFID tag": "RZERO"}),
+            json!({"E Pres": 0, "ended[s]": 0, "RFID tag": "RZERO"}),
         )]);
 
         let mut poller = PlugStatusPoller::new(
@@ -1011,6 +1066,66 @@ mod tests {
 
         assert_eq!(row.0, "n/a");
         assert_eq!(row.1, "n/a");
+        assert_eq!(row.2, "n/a");
+        assert_eq!(row.3, "n/a");
+    }
+
+    #[test]
+    fn unplug_transition_accepts_complete_zero_kwh_report_without_iterating_further() {
+        let connection = Arc::new(Mutex::new(open_test_connection(
+            "runtime-unplug-report-1xx-zero-complete",
+        )));
+        let session_service = SqliteSessionService::new(Arc::clone(&connection));
+
+        let fake_client = FakeKebaClient::new(
+            vec![
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 7}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+                json!({"Plug": 0}),
+            ],
+            vec![],
+        )
+        .with_1xx_reports(vec![
+            (
+                100,
+                json!({"E Pres": 0, "started": "2026-03-04 15:41:00.000", "ended": "2026-03-05 07:29:00.000", "RFID tag": "RZERO"}),
+            ),
+            (
+                101,
+                json!({"E Pres": 65400, "started": "2026-03-04 15:40:00.000", "ended": "2026-03-05 07:30:00.000", "RFID tag": "R101"}),
+            ),
+        ]);
+
+        let mut poller = PlugStatusPoller::new(
+            Box::new(fake_client),
+            session_service,
+            "Carport".to_string(),
+            3,
+        );
+
+        for _ in 0..9 {
+            poller.tick().expect("poll tick should succeed");
+        }
+
+        let db = connection
+            .lock()
+            .expect("connection lock should be available");
+        let row: (String, String, String, String) = db
+            .query_row(
+                "SELECT started, ended, kwh, card_id FROM unplug_log_events ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("inserted unplug event should be readable");
+
+        assert_eq!(row.0, "2026-03-04 15:41");
+        assert_eq!(row.1, "2026-03-05 07:29");
         assert_eq!(row.2, "0.000");
         assert_eq!(row.3, "RZERO");
     }

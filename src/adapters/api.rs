@@ -1,15 +1,17 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, web};
+use actix_web::{HttpResponse, Responder, get, web};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapters::keba_udp::KebaUdpClient;
-const API_KEY_HEADER: &str = "X-API-Key";
-const API_KEY_VALUE: &str = "1r0m";
+use crate::app::services::{SessionQueryHandler, SqliteSessionService};
+
+const MIN_SIGNIFICANT_SESSION_KWH: f64 = 0.05;
 
 #[derive(Clone)]
 pub struct ApiState {
     pub report100_stations: Vec<Report100Station>,
+    pub session_query_service: Option<SqliteSessionService>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,8 +38,26 @@ pub struct Report100Query {
     pub station: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UnplugLogQuery {
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct UnplugLogResponse {
+    pub id: String,
+    pub timestamp: String,
+    pub station: String,
+    pub started: String,
+    pub ended: String,
+    pub kwh: String,
+    #[serde(rename = "cardId")]
+    pub card_id: String,
+}
+
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(health)
+        .service(get_unplug_log_events_endpoint)
         .service(get_carport_latest_report100_endpoint)
         .service(get_entrance_latest_report100_endpoint);
 }
@@ -49,38 +69,59 @@ async fn health() -> impl Responder {
 
 #[get("/sessions/carport/latest")]
 async fn get_carport_latest_report100_endpoint(
-    req: HttpRequest,
     state: web::Data<ApiState>,
 ) -> impl Responder {
-    if !has_valid_api_key(&req) {
-        return unauthorized_response();
-    }
     latest_report100_response(&state, "carport")
 }
 
 #[get("/sessions/entrance/latest")]
 async fn get_entrance_latest_report100_endpoint(
-    req: HttpRequest,
     state: web::Data<ApiState>,
 ) -> impl Responder {
-    if !has_valid_api_key(&req) {
-        return unauthorized_response();
-    }
     latest_report100_response(&state, "entrance")
 }
 
-fn has_valid_api_key(req: &HttpRequest) -> bool {
-    req.headers()
-        .get(API_KEY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value == API_KEY_VALUE)
-        .unwrap_or(false)
-}
+#[get("/unplug-log")]
+async fn get_unplug_log_events_endpoint(
+    state: web::Data<ApiState>,
+    query: web::Query<UnplugLogQuery>,
+) -> impl Responder {
+    const DEFAULT_COUNT: u32 = 5;
+    const MAX_COUNT: u32 = 500;
 
-fn unauthorized_response() -> HttpResponse {
-    HttpResponse::Unauthorized().json(serde_json::json!({
-        "error": "missing or invalid API key"
-    }))
+    let requested_count = query.count.unwrap_or(DEFAULT_COUNT);
+    if requested_count == 0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "query parameter 'count' must be >= 1"
+        }));
+    }
+    let clamped_count = requested_count.min(MAX_COUNT);
+
+    let Some(service) = &state.session_query_service else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "unplug log query service is not configured"
+        }));
+    };
+
+    match service.list_recent_unplug_log_events(clamped_count) {
+        Ok(entries) => HttpResponse::Ok().json(
+            entries
+                .into_iter()
+                .map(|entry| UnplugLogResponse {
+                    id: entry.id,
+                    timestamp: entry.timestamp,
+                    station: entry.station,
+                    started: entry.started,
+                    ended: entry.ended,
+                    kwh: entry.kwh,
+                    card_id: entry.card_id,
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(error) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("failed to load unplug log events: {error}")
+        })),
+    }
 }
 
 fn latest_report100_response(state: &ApiState, station_name: &str) -> HttpResponse {
@@ -155,7 +196,7 @@ struct LatestStationSessionView {
 
 fn has_complete_session_data(view: &LatestStationSessionView) -> bool {
     match (view.started, view.ended, view.kwh) {
-        (Some(started), Some(ended), Some(kwh)) => started > 0 && ended >= started && kwh > 0.0,
+        (Some(started), Some(ended), Some(kwh)) => started > 0 && ended >= started && kwh >= 0.0,
         _ => false,
     }
 }
@@ -165,16 +206,7 @@ fn extract_latest_station_session_view(
     now_ms: i64,
 ) -> LatestStationSessionView {
     let sec_from_report = find_number_from_object(object, &["Sec", "sec", "Seconds", "seconds"]);
-    let kwh = find_number_from_object(
-        object,
-        &[
-            "E Pres",
-            "E pres",
-            "Energy Session",
-            "energy_present_session",
-        ],
-    )
-    .map(normalize_session_kwh);
+    let kwh = parse_session_kwh_from_object(object);
     let started = find_value_from_object(
         object,
         &[
@@ -218,11 +250,21 @@ fn extract_latest_station_session_view(
     }
 }
 
-fn normalize_session_kwh(raw_energy: f64) -> f64 {
-    if raw_energy >= 1000.0 {
-        raw_energy / 10_000.0
+fn parse_session_kwh_from_object(object: &serde_json::Map<String, Value>) -> Option<f64> {
+    if let Some(kwh) = find_number_from_object(object, &["Energy Session", "energy_present_session"])
+    {
+        return Some(clamp_small_session_kwh_to_zero(kwh));
+    }
+
+    find_number_from_object(object, &["E Pres", "E pres"])
+        .map(|value| clamp_small_session_kwh_to_zero(value / 10_000.0))
+}
+
+fn clamp_small_session_kwh_to_zero(kwh: f64) -> f64 {
+    if kwh.abs() < MIN_SIGNIFICANT_SESSION_KWH {
+        0.0
     } else {
-        raw_energy
+        kwh
     }
 }
 
@@ -260,9 +302,34 @@ fn find_number_from_object(
 fn parse_number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
+        Value::String(text) => parse_number_text(text),
         _ => None,
     }
+}
+
+fn parse_number_text(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains(',') && !trimmed.contains('.') {
+        let mut parts = trimmed.split(',');
+        let head = parts.next()?;
+        let tail = parts.next()?;
+        let has_more_parts = parts.next().is_some();
+        let head_digits = head.trim_start_matches('-');
+        let comma_looks_like_thousands_separator = !has_more_parts
+            && head_digits.len() >= 3
+            && head_digits.chars().all(|char| char.is_ascii_digit())
+            && tail.len() == 3
+            && tail.chars().all(|char| char.is_ascii_digit());
+        if comma_looks_like_thousands_separator {
+            return trimmed.replace(',', "").parse::<f64>().ok();
+        }
+    }
+
+    trimmed.replace(',', ".").parse::<f64>().ok()
 }
 
 fn parse_absolute_timestamp_ms(value: &Value) -> Option<i64> {
@@ -363,13 +430,54 @@ mod tests {
 
     use actix_web::{App, body::to_bytes, http::StatusCode, test, web};
     use chrono::Utc;
+    use serde_json::json;
 
     use super::{ApiState, Report100Station, configure_routes, parse_absolute_timestamp_ms};
+    use crate::app::services::{SessionCommandHandler, SqliteSessionService};
+    use crate::domain::models::NewUnplugLogRecord;
+    use crate::test_support::open_test_connection;
 
     fn empty_state() -> ApiState {
         ApiState {
             report100_stations: Vec::new(),
+            session_query_service: None,
         }
+    }
+
+    #[actix_web::test]
+    async fn parse_session_kwh_from_object_converts_e_pres_thousands_string_to_kwh() {
+        let payload = json!({ "E Pres": "285,000" });
+        let object = payload
+            .as_object()
+            .expect("payload fixture should be an object");
+
+        let parsed = super::parse_session_kwh_from_object(object);
+
+        assert_eq!(parsed, Some(28.5));
+    }
+
+    #[actix_web::test]
+    async fn parse_session_kwh_from_object_keeps_energy_session_comma_decimal_as_kwh() {
+        let payload = json!({ "Energy Session": "20,501" });
+        let object = payload
+            .as_object()
+            .expect("payload fixture should be an object");
+
+        let parsed = super::parse_session_kwh_from_object(object);
+
+        assert_eq!(parsed, Some(20.501));
+    }
+
+    #[actix_web::test]
+    async fn parse_session_kwh_from_object_clamps_small_e_pres_to_zero() {
+        let payload = json!({ "E Pres": 285 });
+        let object = payload
+            .as_object()
+            .expect("payload fixture should be an object");
+
+        let parsed = super::parse_session_kwh_from_object(object);
+
+        assert_eq!(parsed, Some(0.0));
     }
 
     #[actix_web::test]
@@ -388,7 +496,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sessions_endpoint_returns_unauthorized_without_api_key() {
+    async fn sessions_endpoint_is_reachable_without_api_key() {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(empty_state()))
@@ -401,12 +509,87 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
 
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn unplug_log_endpoint_returns_latest_entries_limited_by_count() {
+        let connection = Arc::new(Mutex::new(open_test_connection("api-unplug-log-list")));
+        let service = SqliteSessionService::new(Arc::clone(&connection));
+
+        service
+            .insert_unplug_log_event(&NewUnplugLogRecord {
+                timestamp: "2026-03-04 09:00".to_string(),
+                station: "Carport".to_string(),
+                started: "2026-03-04 08:00".to_string(),
+                ended: "2026-03-04 09:00".to_string(),
+                kwh: "3.200".to_string(),
+                card_id: "CARD-1".to_string(),
+            })
+            .expect("first insert should succeed");
+        service
+            .insert_unplug_log_event(&NewUnplugLogRecord {
+                timestamp: "2026-03-04 10:00".to_string(),
+                station: "Entrance".to_string(),
+                started: "2026-03-04 09:30".to_string(),
+                ended: "2026-03-04 10:00".to_string(),
+                kwh: "0.000".to_string(),
+                card_id: "CARD-2".to_string(),
+            })
+            .expect("second insert should succeed");
+        service
+            .insert_unplug_log_event(&NewUnplugLogRecord {
+                timestamp: "2026-03-04 11:00".to_string(),
+                station: "Carport".to_string(),
+                started: "n/a".to_string(),
+                ended: "n/a".to_string(),
+                kwh: "0.000".to_string(),
+                card_id: "CARD-3".to_string(),
+            })
+            .expect("third insert should succeed");
+
+        let mut state = empty_state();
+        state.session_query_service = Some(service);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/unplug-log?count=2").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body())
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["error"], "missing or invalid API key");
+        assert_eq!(json.as_array().map(std::vec::Vec::len), Some(2));
+        assert_eq!(json[0]["timestamp"], "2026-03-04 11:00");
+        assert_eq!(json[0]["cardId"], "CARD-3");
+        assert_eq!(json[1]["timestamp"], "2026-03-04 10:00");
+        assert_eq!(json[1]["cardId"], "CARD-2");
+    }
+
+    #[actix_web::test]
+    async fn unplug_log_endpoint_rejects_count_zero() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/unplug-log?count=0").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["error"], "query parameter 'count' must be >= 1");
     }
 
     #[actix_web::test]
@@ -432,7 +615,7 @@ mod tests {
                     break;
                 }
                 if cmd == "report 100" {
-                    let payload = r#"{"E Pres":12.34,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"ABC123"}"#;
+                    let payload = r#"{"E Pres":123400,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"ABC123"}"#;
                     responder
                         .send_to(payload.as_bytes(), from)
                         .expect("responder send should succeed");
@@ -527,10 +710,10 @@ mod tests {
                 }
                 let payload = match cmd.as_str() {
                     "report 100" => {
-                        r#"{"E Pres":7.1077,"Sec":195395,"started[s]":191012,"ended[s]":0,"started":"191012000","ended":"0","RFID tag":"E100"}"#
+                        r#"{"E Pres":71077,"Sec":195395,"started[s]":191012,"ended[s]":0,"started":"191012000","ended":"0","RFID tag":"E100"}"#
                     }
                     "report 101" => {
-                        r#"{"E Pres":6.5432,"Sec":195395,"started[s]":182170,"ended[s]":184901,"RFID tag":"E101"}"#
+                        r#"{"E Pres":65432,"Sec":195395,"started[s]":182170,"ended[s]":184901,"RFID tag":"E101"}"#
                     }
                     _ => continue,
                 };
@@ -605,10 +788,10 @@ mod tests {
                 }
                 let payload = match cmd.as_str() {
                     "report 100" => {
-                        r#"{"E Pres":9.87,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"ABC123"}"#
+                        r#"{"E Pres":98700,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"ABC123"}"#
                     }
                     "report 101" => {
-                        r#"{"E Pres":7.65,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"XYZ999"}"#
+                        r#"{"E Pres":76500,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"XYZ999"}"#
                     }
                     _ => continue,
                 };
@@ -689,10 +872,10 @@ mod tests {
                 }
                 let payload = match cmd.as_str() {
                     "report 100" => {
-                        r#"{"E Pres":7.1077,"Sec":195395,"started[s]":191012,"ended[s]":0,"started":"191012000","ended":"0","RFID tag":"ABC100"}"#
+                        r#"{"E Pres":71077,"Sec":195395,"started[s]":191012,"ended[s]":0,"started":"191012000","ended":"0","RFID tag":"ABC100"}"#
                     }
                     "report 101" => {
-                        r#"{"E Pres":8.91,"Sec":195395,"started[s]":182170,"ended[s]":184901,"RFID tag":"ABC101"}"#
+                        r#"{"E Pres":89100,"Sec":195395,"started[s]":182170,"ended[s]":184901,"RFID tag":"ABC101"}"#
                     }
                     _ => continue,
                 };
@@ -776,16 +959,16 @@ mod tests {
 
                 let payload = match cmd.as_str() {
                     "report 100" => {
-                        r#"{"E Pres":4.2,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"R100"}"#
+                        r#"{"E Pres":42000,"started":"2026-03-01 16:40:19.000","ended":0,"RFID tag":"R100"}"#
                     }
                     "report 101" => {
                         r#"{"E Pres":0,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"R101"}"#
                     }
                     "report 102" => {
-                        r#"{"E Pres":1.23,"started":null,"ended":"2026-03-02 04:01:59.000","RFID tag":"R102"}"#
+                        r#"{"E Pres":12300,"started":null,"ended":"2026-03-02 04:01:59.000","RFID tag":"R102"}"#
                     }
                     "report 103" => {
-                        r#"{"E Pres":6.54,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"R103"}"#
+                        r#"{"E Pres":65400,"started":"2026-03-01 16:40:19.000","ended":"2026-03-02 04:01:59.000","RFID tag":"R103"}"#
                     }
                     _ => continue,
                 };
@@ -825,20 +1008,96 @@ mod tests {
         let expected_ended =
             parse_absolute_timestamp_ms(&serde_json::json!("2026-03-02 04:01:59.000"))
                 .expect("timestamp should parse");
-        assert_eq!(json["kWh"], 6.54);
-        assert_eq!(json["reportId"], 103);
+        assert_eq!(json["kWh"], 0.0);
+        assert_eq!(json["reportId"], 101);
         assert_eq!(json["started"], expected_started);
         assert_eq!(json["ended"], expected_ended);
-        assert_eq!(json["CardId"], "R103");
+        assert_eq!(json["CardId"], "R101");
 
         let commands = seen_commands
             .lock()
             .expect("command log mutex should be lockable")
             .clone();
-        assert_eq!(
-            commands,
-            vec!["report 100", "report 101", "report 102", "report 103"]
-        );
+        assert_eq!(commands, vec!["report 100", "report 101"]);
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_accepts_zero_kwh_when_timestamps_are_complete() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (size, from) = match responder.recv_from(&mut buffer) {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
+                };
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                let payload = match cmd.as_str() {
+                    "report 100" => Some(
+                        r#"{"E Pres":0,"started":"2026-03-04 15:41:00.000","ended":"2026-03-05 07:29:00.000","RFID tag":"Z100"}"#,
+                    ),
+                    "report 101" => Some(
+                        r#"{"E Pres":65400,"started":"2026-03-04 15:40:00.000","ended":"2026-03-05 07:30:00.000","RFID tag":"R101"}"#,
+                    ),
+                    _ => None,
+                };
+                if let Some(payload) = payload {
+                    responder
+                        .send_to(payload.as_bytes(), from)
+                        .expect("responder send should succeed");
+                }
+            }
+        });
+
+        let mut state = empty_state();
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+
+        assert_eq!(json["kWh"], 0.0);
+        assert_eq!(json["reportId"], 100);
+        assert_eq!(json["CardId"], "Z100");
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
         shutdown_socket
@@ -875,7 +1134,7 @@ mod tests {
                     break;
                 }
                 if cmd == "report 100" {
-                    let payload = r#"{"E Pres":4.2,"Sec":"40000000","started":"26332000","ended":"35131000","RFID tag":"REL1"}"#;
+                    let payload = r#"{"E Pres":42000,"Sec":"40000000","started":"26332000","ended":"35131000","RFID tag":"REL1"}"#;
                     responder
                         .send_to(payload.as_bytes(), from)
                         .expect("responder send should succeed");
@@ -965,7 +1224,7 @@ mod tests {
                 }
                 if cmd == "report 100" {
                     let payload =
-                        r#"{"E Pres":4.2,"Sec":"40000000","started":26332000,"ended":35131000,"RFID tag":"REL2"}"#;
+                        r#"{"E Pres":42000,"Sec":"40000000","started":26332000,"ended":35131000,"RFID tag":"REL2"}"#;
                     responder
                         .send_to(payload.as_bytes(), from)
                         .expect("responder send should succeed");
