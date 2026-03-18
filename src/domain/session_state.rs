@@ -310,7 +310,10 @@ mod tests {
 
         assert_eq!(machine.observe_at(true, TimestampMs(2_000)), None);
         assert_eq!(machine.observe_at(true, TimestampMs(2_100)), None);
-        assert_eq!(machine.active_session_started_at(), Some(TimestampMs(2_000)));
+        assert_eq!(
+            machine.active_session_started_at(),
+            Some(TimestampMs(2_000))
+        );
     }
 
     #[test]

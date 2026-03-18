@@ -80,6 +80,15 @@ else:
 PY
 }
 
+load_api_key_from_env_file() {
+  local env_file="/etc/keba/keba-home-api-reader.env"
+  if [[ ! -f "${env_file}" ]]; then
+    return 0
+  fi
+
+  sudo grep -m1 '^API_KEY=' "${env_file}" 2>/dev/null | cut -d= -f2- | tr -d '\r'
+}
+
 cd "${REPO_DIR}"
 
 require_cmd git
@@ -94,6 +103,11 @@ API_BIN_TARGET="$(resolve_exec_path "keba-home-api-reader" "/opt/keba_home_api/k
 SERVICE_TARGET_DIR="$(dirname "${SERVICE_BIN_TARGET}")"
 API_TARGET_DIR="$(dirname "${API_BIN_TARGET}")"
 DEPLOY_SCRIPTS_DIR="${API_TARGET_DIR}/scripts"
+API_KEY_VALUE="$(load_api_key_from_env_file || true)"
+CURL_AUTH_ARGS=()
+if [[ -n "${API_KEY_VALUE}" ]]; then
+  CURL_AUTH_ARGS=(-H "Authorization: Bearer ${API_KEY_VALUE}")
+fi
 
 echo "[1/8] Update repository"
 git pull --ff-only origin master
@@ -131,7 +145,7 @@ for unit in "${SERVICES[@]}"; do
 done
 
 echo "[8/8] API checks"
-health_json="$(curl -fsS http://127.0.0.1:8080/health)"
+health_json="$(curl -fsS http://127.0.0.1:8080/api/v1/health)"
 health_status="$(parse_json_field "${health_json}" "status" || true)"
 if [[ "${health_status}" != "ok" ]]; then
   echo "health check failed: ${health_json}" >&2
@@ -139,7 +153,7 @@ if [[ "${health_status}" != "ok" ]]; then
 fi
 echo "${health_json}"
 
-carport_json="$(curl -fsS http://127.0.0.1:8080/sessions/carport/latest)"
+carport_json="$(curl -fsS "${CURL_AUTH_ARGS[@]}" http://127.0.0.1:8080/api/v1/sessions/carport/latest)"
 if parse_json_field "${carport_json}" "error" >/dev/null 2>&1; then
   echo "carport latest returned error payload: ${carport_json}"
 else

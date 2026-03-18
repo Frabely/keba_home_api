@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     pub db_path: String,
     pub http_bind: String,
+    pub cors_allowed_origins: CorsAllowedOrigins,
+    pub api_key: Option<String>,
     pub debounce_samples: usize,
     pub station_id: Option<String>,
     pub status_log_interval_seconds: u64,
@@ -24,6 +26,12 @@ pub enum KebaSource {
     Udp,
     Modbus,
     DebugFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorsAllowedOrigins {
+    Any,
+    Exact(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +109,10 @@ impl AppConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+            cors_allowed_origins: parse_cors_allowed_origins(&lookup)?,
+            api_key: lookup("API_KEY")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 3_usize)?,
             station_id: station_id.clone(),
             status_log_interval_seconds: parse_or_default(
@@ -236,9 +248,38 @@ where
     Ok(stations)
 }
 
+fn parse_cors_allowed_origins<F>(lookup: &F) -> Result<CorsAllowedOrigins, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = lookup("CORS_ALLOWED_ORIGINS") else {
+        return Ok(CorsAllowedOrigins::Any);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return Ok(CorsAllowedOrigins::Any);
+    }
+
+    let origins = trimmed
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if origins.is_empty() {
+        return Err(AppError::config(
+            "CORS_ALLOWED_ORIGINS must be '*' or a comma-separated list of origins",
+        ));
+    }
+
+    Ok(CorsAllowedOrigins::Exact(origins))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, KebaSource, StatusStationConfig};
+    use super::{AppConfig, CorsAllowedOrigins, KebaSource, StatusStationConfig};
 
     #[test]
     fn rejects_missing_keba_ip() {
@@ -273,6 +314,8 @@ mod tests {
             assert_eq!(result.db_path, "/var/lib/keba/keba.db");
         }
         assert_eq!(result.http_bind, "0.0.0.0:8080");
+        assert_eq!(result.cors_allowed_origins, CorsAllowedOrigins::Any);
+        assert_eq!(result.api_key, None);
         assert_eq!(result.debounce_samples, 3);
         assert_eq!(result.station_id, None);
         assert_eq!(result.status_log_interval_seconds, 60);
@@ -406,5 +449,49 @@ mod tests {
         )
         .expect("api mode should not require debug file");
         assert_eq!(result.keba_source, KebaSource::DebugFile);
+    }
+
+    #[test]
+    fn parses_explicit_cors_origin_list() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "CORS_ALLOWED_ORIGINS" => {
+                Some("https://app.example.com, https://phone.example.com".to_string())
+            }
+            _ => None,
+        })
+        .expect("config should parse explicit cors origins");
+
+        assert_eq!(
+            result.cors_allowed_origins,
+            CorsAllowedOrigins::Exact(vec![
+                "https://app.example.com".to_string(),
+                "https://phone.example.com".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_optional_api_key() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "API_KEY" => Some("secret-token".to_string()),
+            _ => None,
+        })
+        .expect("config should parse api key");
+
+        assert_eq!(result.api_key.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn ignores_blank_api_key() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "API_KEY" => Some("   ".to_string()),
+            _ => None,
+        })
+        .expect("blank api key should be treated as disabled");
+
+        assert_eq!(result.api_key, None);
     }
 }

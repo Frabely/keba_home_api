@@ -5,6 +5,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
@@ -15,7 +16,7 @@ use crate::adapters::api::{ApiState, Report100Station, configure_routes};
 use crate::adapters::keba_debug_file::KebaDebugFileClient;
 use crate::adapters::keba_modbus::KebaModbusClient;
 use crate::adapters::keba_udp::{KebaClient, KebaClientError, KebaUdpClient};
-use crate::app::config::{AppConfig, KebaSource};
+use crate::app::config::{AppConfig, CorsAllowedOrigins, KebaSource};
 use crate::app::error::AppError;
 use crate::app::services::{SessionCommandHandler, SqliteSessionService};
 use crate::domain::keba_payload::{ParseError, parse_report2};
@@ -162,10 +163,7 @@ impl PlugStatusPoller {
             let details = self.fetch_unplug_details_once(disconnected_at_ms);
             if details.is_complete() {
                 if attempt > 1 {
-                    tracing::info!(
-                        attempt,
-                        "resolved unplug details after retry"
-                    );
+                    tracing::info!(attempt, "resolved unplug details after retry");
                 }
                 return details;
             }
@@ -346,8 +344,8 @@ fn parse_numeric_text(text: &str) -> Option<f64> {
 }
 
 fn parse_session_wh_from_report(report: &serde_json::Map<String, Value>) -> Option<f64> {
-    if let Some(wh) = find_value(report, &["Energy Session", "energy_present_session"])
-        .and_then(parse_f64)
+    if let Some(wh) =
+        find_value(report, &["Energy Session", "energy_present_session"]).and_then(parse_f64)
     {
         return Some(wh);
     }
@@ -460,6 +458,7 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
         session_query_service: Some(session_service.clone()),
+        api_key: config.api_key.clone(),
     };
 
     let poller = build_poller(&config, session_service.clone())?;
@@ -470,7 +469,7 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
         Arc::clone(&stop_flag),
     );
 
-    let server_result = run_http_server(&config.http_bind, api_state);
+    let server_result = run_http_server(&config.http_bind, &config.cors_allowed_origins, api_state);
     stop_flag.store(true, Ordering::Relaxed);
     let join_result = poller_handle.join();
     if join_result.is_err() {
@@ -503,9 +502,10 @@ pub fn run_api(config: AppConfig) -> Result<(), AppError> {
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
         session_query_service: Some(session_query_service),
+        api_key: config.api_key.clone(),
     };
 
-    run_http_server(&config.http_bind, api_state)
+    run_http_server(&config.http_bind, &config.cors_allowed_origins, api_state)
 }
 
 fn open_shared_connection_writer(db_path: &str) -> Result<Arc<Mutex<Connection>>, AppError> {
@@ -626,11 +626,31 @@ fn run_debug_replay_loop(
     }
 }
 
-fn run_http_server(http_bind: &str, api_state: ApiState) -> Result<(), AppError> {
+fn build_cors(cors_allowed_origins: &CorsAllowedOrigins) -> Cors {
+    let cors = Cors::default()
+        .allow_any_method()
+        .allow_any_header()
+        .max_age(3600);
+
+    match cors_allowed_origins {
+        CorsAllowedOrigins::Any => cors.allow_any_origin(),
+        CorsAllowedOrigins::Exact(origins) => origins
+            .iter()
+            .fold(cors, |cors, origin| cors.allowed_origin(origin)),
+    }
+}
+
+fn run_http_server(
+    http_bind: &str,
+    cors_allowed_origins: &CorsAllowedOrigins,
+    api_state: ApiState,
+) -> Result<(), AppError> {
     tracing::info!(bind = %http_bind, "http server starting");
+    let cors_allowed_origins = cors_allowed_origins.clone();
     let server_result = actix_web::rt::System::new().block_on(async move {
         HttpServer::new(move || {
             App::new()
+                .wrap(build_cors(&cors_allowed_origins))
                 .app_data(web::Data::new(api_state.clone()))
                 .configure(configure_routes)
         })
@@ -646,11 +666,14 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
+    use actix_web::http::{Method, StatusCode, header};
+    use actix_web::{App, HttpResponse, web};
     use serde_json::json;
 
     use super::PlugStatusPoller;
     use crate::adapters::keba_debug_file::KebaDebugFileClient;
     use crate::adapters::keba_udp::{KebaClient, KebaClientError};
+    use crate::app::config::CorsAllowedOrigins;
     use crate::app::services::SqliteSessionService;
     use crate::test_support::open_test_connection;
 
@@ -745,6 +768,58 @@ mod tests {
 
         assert_eq!(details.wh, "28500.0");
         assert_eq!(details.card_id, "C1");
+    }
+
+    #[actix_web::test]
+    async fn cors_allows_any_origin_when_not_restricted() {
+        let app = actix_web::test::init_service(
+            App::new()
+                .wrap(super::build_cors(&CorsAllowedOrigins::Any))
+                .route(
+                    "/health",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .insert_header((header::ORIGIN, "https://remote.example.com"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+    }
+
+    #[actix_web::test]
+    async fn cors_rejects_origin_outside_explicit_allow_list() {
+        let app = actix_web::test::init_service(
+            App::new()
+                .wrap(super::build_cors(&CorsAllowedOrigins::Exact(vec![
+                    "https://app.example.com".to_string(),
+                ])))
+                .route(
+                    "/health",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .insert_header((header::ORIGIN, "https://blocked.example.com"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

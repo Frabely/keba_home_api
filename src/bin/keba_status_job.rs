@@ -353,9 +353,9 @@ mod tests {
         let status = build_status(&report2, &report3);
 
         assert_eq!(status.status_text, "Angesteckt, wartet/bereit");
-        assert_eq!(status.charging, false);
+        assert!(!status.charging);
         assert_eq!(status.session_kwh, Some(4.121));
-        assert_eq!(status.total_kwh, Some(28_346.7494));
+        assert_eq!(status.total_kwh, Some(28_346.749_4));
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
         let status = build_status(&report2, &report3);
 
         assert_eq!(status.status_text, "Angesteckt, aber gesperrt/deaktiviert");
-        assert_eq!(status.enabled, false);
+        assert!(!status.enabled);
     }
 
     #[test]

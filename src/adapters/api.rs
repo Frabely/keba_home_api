@@ -1,4 +1,7 @@
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{
+    Error, HttpResponse, Responder, body::EitherBody, body::MessageBody, dev::ServiceRequest,
+    dev::ServiceResponse, http::header, middleware::Next, middleware::from_fn, web,
+};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,10 +9,13 @@ use serde_json::Value;
 use crate::adapters::keba_udp::KebaUdpClient;
 use crate::app::services::{SessionQueryHandler, SqliteSessionService};
 
+const API_V1_PREFIX: &str = "/api/v1";
+
 #[derive(Clone)]
 pub struct ApiState {
     pub report100_stations: Vec<Report100Station>,
     pub session_query_service: Option<SqliteSessionService>,
+    pub api_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,33 +65,83 @@ pub struct UnplugLogResponse {
     pub card_id: String,
 }
 
-pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(health)
-        .service(get_unplug_log_events_endpoint)
-        .service(get_carport_latest_report100_endpoint)
-        .service(get_entrance_latest_report100_endpoint);
+fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/unplug-log")
+            .wrap(from_fn(api_key_middleware))
+            .route(web::get().to(get_unplug_log_events_endpoint)),
+    )
+    .service(
+        web::resource("/sessions/carport/latest")
+            .wrap(from_fn(api_key_middleware))
+            .route(web::get().to(get_carport_latest_report100_endpoint)),
+    )
+    .service(
+        web::resource("/sessions/entrance/latest")
+            .wrap(from_fn(api_key_middleware))
+            .route(web::get().to(get_entrance_latest_report100_endpoint)),
+    );
 }
 
-#[get("/health")]
+pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(web::resource("/health").route(web::get().to(health)))
+        .configure(configure_protected_routes)
+        .service(
+            web::scope(API_V1_PREFIX)
+                .service(web::resource("/health").route(web::get().to(health)))
+                .configure(configure_protected_routes),
+        );
+}
+
+fn unauthorized_response() -> HttpResponse {
+    HttpResponse::Unauthorized()
+        .insert_header((header::WWW_AUTHENTICATE, "Bearer"))
+        .json(serde_json::json!({
+            "error": "missing or invalid api key"
+        }))
+}
+
+fn provided_bearer_token(req: &ServiceRequest) -> Option<&str> {
+    req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+}
+
+async fn api_key_middleware(
+    req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<EitherBody<impl MessageBody>>, Error> {
+    let Some(state) = req.app_data::<web::Data<ApiState>>() else {
+        return Ok(next.call(req).await?.map_into_left_body());
+    };
+
+    let Some(expected_api_key) = state.api_key.as_deref() else {
+        return Ok(next.call(req).await?.map_into_left_body());
+    };
+
+    if provided_bearer_token(&req) != Some(expected_api_key) {
+        return Ok(req
+            .into_response(unauthorized_response())
+            .map_into_right_body());
+    }
+
+    Ok(next.call(req).await?.map_into_left_body())
+}
+
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
 }
 
-#[get("/sessions/carport/latest")]
-async fn get_carport_latest_report100_endpoint(
-    state: web::Data<ApiState>,
-) -> impl Responder {
+async fn get_carport_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
     latest_report100_response(&state, "carport")
 }
 
-#[get("/sessions/entrance/latest")]
-async fn get_entrance_latest_report100_endpoint(
-    state: web::Data<ApiState>,
-) -> impl Responder {
+async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
     latest_report100_response(&state, "entrance")
 }
 
-#[get("/unplug-log")]
 async fn get_unplug_log_events_endpoint(
     state: web::Data<ApiState>,
     query: web::Query<UnplugLogQuery>,
@@ -255,13 +311,13 @@ fn extract_latest_station_session_view(
 }
 
 fn parse_session_kwh_from_object(object: &serde_json::Map<String, Value>) -> Option<f64> {
-    if let Some(kwh) = find_number_from_object(object, &["Energy Session", "energy_present_session"])
+    if let Some(kwh) =
+        find_number_from_object(object, &["Energy Session", "energy_present_session"])
     {
         return Some(kwh);
     }
 
-    find_number_from_object(object, &["E Pres", "E pres"])
-        .map(|value| value / 10.0)
+    find_number_from_object(object, &["E Pres", "E pres"]).map(|value| value / 10.0)
 }
 
 fn find_value_from_object<'a>(
@@ -424,7 +480,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use actix_web::{App, body::to_bytes, http::StatusCode, test, web};
+    use actix_web::{App, body::to_bytes, http::StatusCode, http::header, test, web};
     use chrono::Utc;
     use serde_json::json;
 
@@ -437,6 +493,14 @@ mod tests {
         ApiState {
             report100_stations: Vec::new(),
             session_query_service: None,
+            api_key: None,
+        }
+    }
+
+    fn state_with_api_key(api_key: &str) -> ApiState {
+        ApiState {
+            api_key: Some(api_key.to_string()),
+            ..empty_state()
         }
     }
 
@@ -509,6 +573,112 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn versioned_health_endpoint_returns_ok() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/api/v1/health").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn versioned_sessions_endpoint_is_reachable_without_api_key() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn health_endpoint_stays_open_with_configured_api_key() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state_with_api_key("secret-token")))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/api/v1/health").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn versioned_sessions_endpoint_rejects_missing_bearer_token_when_api_key_is_configured() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state_with_api_key("secret-token")))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/sessions/carport/latest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["error"], "missing or invalid api key");
+    }
+
+    #[actix_web::test]
+    async fn legacy_sessions_endpoint_rejects_wrong_bearer_token_when_api_key_is_configured() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state_with_api_key("secret-token")))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .insert_header((header::AUTHORIZATION, "Bearer wrong-token"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn versioned_sessions_endpoint_accepts_matching_bearer_token_when_api_key_is_configured()
+    {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state_with_api_key("secret-token")))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/sessions/carport/latest")
+            .insert_header((header::AUTHORIZATION, "Bearer secret-token"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
     async fn unplug_log_endpoint_returns_latest_entries_limited_by_count() {
         let connection = Arc::new(Mutex::new(open_test_connection("api-unplug-log-list")));
         let service = SqliteSessionService::new(Arc::clone(&connection));
@@ -553,7 +723,9 @@ mod tests {
         )
         .await;
 
-        let req = test::TestRequest::get().uri("/unplug-log?count=2").to_request();
+        let req = test::TestRequest::get()
+            .uri("/unplug-log?count=2")
+            .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
@@ -577,7 +749,9 @@ mod tests {
         )
         .await;
 
-        let req = test::TestRequest::get().uri("/unplug-log?count=0").to_request();
+        let req = test::TestRequest::get()
+            .uri("/unplug-log?count=0")
+            .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -601,11 +775,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -683,7 +853,8 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn entrance_latest_endpoint_falls_back_to_report101_when_report100_contains_zero_values() {
+    async fn entrance_latest_endpoint_falls_back_to_report101_when_report100_contains_zero_values()
+    {
         let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
         responder
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -695,11 +866,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -773,11 +940,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -857,11 +1020,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -938,11 +1097,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -1041,11 +1196,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -1120,11 +1271,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -1196,8 +1343,8 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn carport_latest_endpoint_uses_sec_fallback_when_absolute_numeric_timestamp_is_implausible(
-    ) {
+    async fn carport_latest_endpoint_uses_sec_fallback_when_absolute_numeric_timestamp_is_implausible()
+     {
         let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
         responder
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -1209,18 +1356,13 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
                 }
                 if cmd == "report 100" {
-                    let payload =
-                        r#"{"E Pres":42000,"Sec":"40000000","started":26332000,"ended":35131000,"RFID tag":"REL2"}"#;
+                    let payload = r#"{"E Pres":42000,"Sec":"40000000","started":26332000,"ended":35131000,"RFID tag":"REL2"}"#;
                     responder
                         .send_to(payload.as_bytes(), from)
                         .expect("responder send should succeed");
@@ -1262,10 +1404,8 @@ mod tests {
             (now_before as f64 - (sec_now - started_raw) * 1000.0) as i64 - 2000;
         let expected_started_max =
             (now_after as f64 - (sec_now - started_raw) * 1000.0) as i64 + 2000;
-        let expected_ended_min =
-            (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
-        let expected_ended_max =
-            (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
+        let expected_ended_min = (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
+        let expected_ended_max = (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
 
         let started = json["started"].as_i64().expect("started should be i64");
         let ended = json["ended"].as_i64().expect("ended should be i64");
@@ -1300,11 +1440,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -1370,11 +1506,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;
@@ -1421,10 +1553,8 @@ mod tests {
             (now_before as f64 - (sec_now - started_raw) * 1000.0) as i64 - 2000;
         let expected_started_max =
             (now_after as f64 - (sec_now - started_raw) * 1000.0) as i64 + 2000;
-        let expected_ended_min =
-            (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
-        let expected_ended_max =
-            (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
+        let expected_ended_min = (now_before as f64 - (sec_now - ended_raw) * 1000.0) as i64 - 2000;
+        let expected_ended_max = (now_after as f64 - (sec_now - ended_raw) * 1000.0) as i64 + 2000;
 
         let started = json["started"].as_i64().expect("started should be i64");
         let ended = json["ended"].as_i64().expect("ended should be i64");
@@ -1459,11 +1589,7 @@ mod tests {
 
         let responder_handle = thread::spawn(move || {
             let mut buffer = [0_u8; 512];
-            loop {
-                let (size, from) = match responder.recv_from(&mut buffer) {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
                 let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                 if cmd == "shutdown-test-responder" {
                     break;

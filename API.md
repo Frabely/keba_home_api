@@ -2,14 +2,42 @@
 
 All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
 JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`) and `/unplug-log` response fields (`Id`, `Timestamp`, `Station`, `Started`, `Ended`, `Wh`, `CardId`).
-Session endpoints sind aktuell ohne API-Key erreichbar.
+Die kanonischen Endpunkte liegen unter `/api/v1`.
+Die bisherigen Root-Pfade ohne `/api/v1` bleiben vorerst aus Kompatibilitaetsgruenden erreichbar.
+Browser-Zugriffe werden ueber `CORS_ALLOWED_ORIGINS` gesteuert; Default ist aktuell `*`.
 
-## `GET /health`
+Ohne Domain lautet der Host einfach:
+```text
+http://<OEFFENTLICHE_IP>:8080
+```
+
+Beispiel:
+```text
+http://84.123.45.67:8080/api/v1/health
+```
+
+## Auth
+
+Wenn `API_KEY` gesetzt ist, sind alle produktiven Endpunkte ausser `/health` und `/api/v1/health` per statischem Bearer-Token geschuetzt.
+
+Header:
+```bash
+Authorization: Bearer <API_KEY>
+```
+
+Beispiel:
+```bash
+curl -s \
+  -H "Authorization: Bearer $API_KEY" \
+  http://localhost:8080/api/v1/sessions/carport/latest | jq
+```
+
+## `GET /api/v1/health`
 Health check endpoint.
 
 Example:
 ```bash
-curl -s http://localhost:8080/health | jq
+curl -s http://localhost:8080/api/v1/health | jq
 ```
 
 Response `200`:
@@ -19,13 +47,17 @@ Response `200`:
 }
 ```
 
-## `GET /sessions/carport/latest`
+Legacy compatibility path: `GET /health`
+
+## `GET /api/v1/sessions/carport/latest`
 Fetch latest session view from KEBA `report 100..130`.  
 The API takes the first report where `started > 0`, `ended > 0` and `E Pres >= 0`.
 
 Example:
 ```bash
-curl -s http://localhost:8080/sessions/carport/latest | jq
+curl -s \
+  -H "Authorization: Bearer $API_KEY" \
+  http://localhost:8080/api/v1/sessions/carport/latest | jq
 ```
 
 Response `200`:
@@ -39,24 +71,30 @@ Response `200`:
 }
 ```
 
-## `GET /sessions/entrance/latest`
+Legacy compatibility path: `GET /sessions/carport/latest`
+
+## `GET /api/v1/sessions/entrance/latest`
 Same contract as `/sessions/carport/latest`, but for station `entrance`.
 
 Example:
 ```bash
-curl -s http://localhost:8080/sessions/entrance/latest | jq
+curl -s \
+  -H "Authorization: Bearer $API_KEY" \
+  http://localhost:8080/api/v1/sessions/entrance/latest | jq
 ```
 
 Response `200`: same JSON shape as above.
 
-## `GET /unplug-log?count={x}`
+Legacy compatibility path: `GET /sessions/entrance/latest`
+
+## `GET /api/v1/unplug-log?count={x}`
 Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp DESC, Id DESC`.
 `count` entspricht einem SQL-`LIMIT` (vergleichbar mit `SELECT TOP x ...`) und ist optional.
 
 Beispiele:
 ```bash
-curl -s "http://localhost:8080/unplug-log?count=5" | jq
-curl -s "http://localhost:8080/unplug-log" | jq
+curl -s -H "Authorization: Bearer $API_KEY" "http://localhost:8080/api/v1/unplug-log?count=5" | jq
+curl -s -H "Authorization: Bearer $API_KEY" "http://localhost:8080/api/v1/unplug-log" | jq
 ```
 
 Response `200`:
@@ -90,6 +128,13 @@ Response `200`:
 }
 ```
 
+`401` (fehlender oder falscher API-Key):
+```json
+{
+  "error": "missing or invalid api key"
+}
+```
+
 `502` (KEBA communication/payload issue):
 ```json
 {
@@ -103,4 +148,16 @@ or
 {
   "error": "reports 100-130 do not contain started/end timestamps and E Pres >= 0"
 }
+```
+
+## CORS
+
+Default:
+```bash
+CORS_ALLOWED_ORIGINS=*
+```
+
+Restriktiver Betrieb mit bekannter Frontend-Origin:
+```bash
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://phone.example.com
 ```
