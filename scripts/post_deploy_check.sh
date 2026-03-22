@@ -139,7 +139,7 @@ if [[ "${health_status}" != "ok" ]]; then
 fi
 echo "${health_json}"
 
-carport_json="$(curl -fsS "${CURL_AUTH_ARGS[@]}" http://127.0.0.1:8080/api/v1/sessions/carport/latest)"
+carport_json="$(curl -fsS http://127.0.0.1:8080/api/v1/sessions/carport/latest)"
 if parse_json_field "${carport_json}" "error" >/dev/null 2>&1; then
   echo "carport latest returned error payload: ${carport_json}"
 else
