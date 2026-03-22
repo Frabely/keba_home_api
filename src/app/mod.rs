@@ -59,7 +59,6 @@ fn log_bootstrap(mode: &str, config: &config::AppConfig) {
         poll_interval_ms = config.poll_interval_ms,
         db_path = %config.db_path,
         http_bind = %config.http_bind,
-        api_key_configured = config.api_key.is_some(),
         debounce_samples = config.debounce_samples,
         status_log_interval_seconds = config.status_log_interval_seconds,
         status_station_count = config.status_stations.len(),

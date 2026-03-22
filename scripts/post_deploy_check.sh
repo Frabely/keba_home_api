@@ -80,15 +80,6 @@ else:
 PY
 }
 
-load_api_key_from_env_file() {
-  local env_file="/etc/keba/keba-home-api-reader.env"
-  if [[ ! -f "${env_file}" ]]; then
-    return 0
-  fi
-
-  sudo grep -m1 '^API_KEY=' "${env_file}" 2>/dev/null | cut -d= -f2- | tr -d '\r'
-}
-
 cd "${REPO_DIR}"
 
 require_cmd git
@@ -103,11 +94,6 @@ API_BIN_TARGET="$(resolve_exec_path "keba-home-api-reader" "/opt/keba_home_api/k
 SERVICE_TARGET_DIR="$(dirname "${SERVICE_BIN_TARGET}")"
 API_TARGET_DIR="$(dirname "${API_BIN_TARGET}")"
 DEPLOY_SCRIPTS_DIR="${API_TARGET_DIR}/scripts"
-API_KEY_VALUE="$(load_api_key_from_env_file || true)"
-CURL_AUTH_ARGS=()
-if [[ -n "${API_KEY_VALUE}" ]]; then
-  CURL_AUTH_ARGS=(-H "Authorization: Bearer ${API_KEY_VALUE}")
-fi
 
 echo "[1/8] Update repository"
 git pull --ff-only origin master

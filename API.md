@@ -18,19 +18,8 @@ http://84.123.45.67:8080/api/v1/health
 
 ## Auth
 
-Wenn `API_KEY` gesetzt ist, sind alle produktiven Endpunkte ausser `/health` und `/api/v1/health` per statischem Bearer-Token geschuetzt.
-
-Header:
-```bash
-Authorization: Bearer <API_KEY>
-```
-
-Beispiel:
-```bash
-curl -s \
-  -H "Authorization: Bearer $API_KEY" \
-  http://localhost:8080/api/v1/sessions/carport/latest | jq
-```
+Aktuell gibt es bewusst keine Authentifizierung. Alle Readonly-Endpunkte sind ohne Token erreichbar.
+Wenn die API oeffentlich ins Internet gestellt wird, erfolgt der Zugriff derzeit also unverschluesselt und ohne Request-Auth.
 
 ## `GET /api/v1/health`
 Health check endpoint.
@@ -55,9 +44,7 @@ The API takes the first report where `started > 0`, `ended > 0` and `E Pres >= 0
 
 Example:
 ```bash
-curl -s \
-  -H "Authorization: Bearer $API_KEY" \
-  http://localhost:8080/api/v1/sessions/carport/latest | jq
+curl -s http://localhost:8080/api/v1/sessions/carport/latest | jq
 ```
 
 Response `200`:
@@ -78,9 +65,7 @@ Same contract as `/sessions/carport/latest`, but for station `entrance`.
 
 Example:
 ```bash
-curl -s \
-  -H "Authorization: Bearer $API_KEY" \
-  http://localhost:8080/api/v1/sessions/entrance/latest | jq
+curl -s http://localhost:8080/api/v1/sessions/entrance/latest | jq
 ```
 
 Response `200`: same JSON shape as above.
@@ -93,8 +78,8 @@ Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp
 
 Beispiele:
 ```bash
-curl -s -H "Authorization: Bearer $API_KEY" "http://localhost:8080/api/v1/unplug-log?count=5" | jq
-curl -s -H "Authorization: Bearer $API_KEY" "http://localhost:8080/api/v1/unplug-log" | jq
+curl -s "http://localhost:8080/api/v1/unplug-log?count=5" | jq
+curl -s "http://localhost:8080/api/v1/unplug-log" | jq
 ```
 
 Response `200`:
@@ -125,13 +110,6 @@ Response `200`:
 ```json
 {
   "error": "query parameter 'count' must be >= 1"
-}
-```
-
-`401` (fehlender oder falscher API-Key):
-```json
-{
-  "error": "missing or invalid api key"
 }
 ```
 

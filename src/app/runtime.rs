@@ -458,7 +458,6 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
         session_query_service: Some(session_service.clone()),
-        api_key: config.api_key.clone(),
     };
 
     let poller = build_poller(&config, session_service.clone())?;
@@ -502,7 +501,6 @@ pub fn run_api(config: AppConfig) -> Result<(), AppError> {
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
         session_query_service: Some(session_query_service),
-        api_key: config.api_key.clone(),
     };
 
     run_http_server(&config.http_bind, &config.cors_allowed_origins, api_state)

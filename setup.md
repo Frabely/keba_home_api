@@ -96,8 +96,8 @@ Wichtig:
 - `POLL_INTERVAL_MS` Default fuer Writer ist `20000` (20 Sekunden), falls der Wert in der ENV nicht gesetzt ist.
 - Fuer die API-Endpunkte `GET /api/v1/sessions/carport/latest` und `GET /api/v1/sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
 - Die kanonischen API-Endpunkte liegen unter `/api/v1` (Legacy-Rootpfade bleiben zunaechst aktiv).
-- Wenn `API_KEY` gesetzt ist, verlangen alle API-Endpunkte ausser `/health` einen Header `Authorization: Bearer <API_KEY>`.
-- `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default `*` ist fuer den Uebergang ohne Auth offen; spaeter auf feste Origins reduzieren.
+- Die API ist aktuell bewusst ohne Auth fuer Readonly-Zugriffe erreichbar.
+- `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default `*` ist fuer den oeffentlichen Direktzugriff offen; spaeter auf feste Origins reduzieren.
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash
@@ -148,7 +148,7 @@ bash scripts/post_deploy_check.sh
 Wichtig:
 - `post_deploy_check.sh` muss aus dem Git-Checkout ausgefuehrt werden (z. B. `~/repos/keba_home_api`), nicht aus `/opt/keba_home_api`.
 - Das Script baut im Repo, installiert die Binaries in die von systemd verwendeten `ExecStart`-Pfade und startet danach alle Services neu.
-- Die API-Pruefung validiert `/api/v1/health` strikt (`status=ok`) und nutzt fuer `/api/v1/sessions/carport/latest` automatisch `Authorization: Bearer <API_KEY>`, falls `API_KEY` in `/etc/keba/keba-home-api-reader.env` gesetzt ist.
+- Die API-Pruefung validiert `/api/v1/health` strikt (`status=ok`) und testet den Session-Endpunkt ohne Auth-Header.
 
 Logs:
 ```bash
@@ -189,7 +189,7 @@ sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-
 ## API Smoke Check
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/health
-curl -s -H "Authorization: Bearer <API_KEY>" http://127.0.0.1:8080/api/v1/sessions/carport/latest
+curl -s http://127.0.0.1:8080/api/v1/sessions/carport/latest
 ```
 
 ## Von ueberall erreichbar ohne Domain (direkt ueber oeffentliche IP)
@@ -203,7 +203,6 @@ sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:8080/' /etc/keba/keba-home-api-re
 2. Fuer Browser-Zugriffe ohne feste Frontend-Domain CORS offen lassen:
 ```bash
 sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=*|' /etc/keba/keba-home-api-reader.env
-sudo sed -i 's/^API_KEY=.*/API_KEY=DEIN_STARKER_KEY/' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 
@@ -226,14 +225,14 @@ http://84.123.45.67:8080/api/v1/health
 5. Lokal und extern testen:
 ```bash
 curl -i http://127.0.0.1:8080/api/v1/health
-curl -i -H "Authorization: Bearer <API_KEY>" http://<OEFFENTLICHE_IP>:8080/api/v1/sessions/carport/latest
+curl -i http://<OEFFENTLICHE_IP>:8080/api/v1/sessions/carport/latest
 ```
 
 Hinweise:
 - Ohne Domain gibt es in diesem Setup kein automatisches HTTPS/TLS.
 - Wenn sich deine oeffentliche IP aendert, aendert sich auch die URL.
 - Manche Anschluesse nutzen CGNAT oder blockieren eingehende Ports; dann ist direkter Internetzugriff trotz Port-Forwarding nicht moeglich.
-- Auch mit API-Key laeuft dieses Setup unverschluesselt ueber HTTP; der Token geht also nicht ueber TLS.
+- Dieses Setup laeuft unverschluesselt ueber HTTP und derzeit ohne Authentifizierung.
 
 ## Von ueberall erreichbar (empfohlen: Caddy + HTTPS)
 Wenn die API wirklich aus dem Internet erreichbar sein soll, nicht den nackten Port `8080` direkt weiterleiten. Besser: API lokal halten und per Reverse Proxy auf `443` publizieren.
@@ -247,7 +246,6 @@ sudo systemctl restart keba-home-api-reader
 2. CORS fuer deinen spaeteren Frontend-Ursprung setzen:
 ```bash
 sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://app.example.com|' /etc/keba/keba-home-api-reader.env
-sudo sed -i 's/^API_KEY=.*/API_KEY=DEIN_STARKER_KEY/' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 
@@ -273,12 +271,12 @@ sudo systemctl status caddy
 6. Extern testen:
 ```bash
 curl -i https://api.example.com/api/v1/health
-curl -i -H "Authorization: Bearer <API_KEY>" https://api.example.com/api/v1/sessions/carport/latest
+curl -i https://api.example.com/api/v1/sessions/carport/latest
 ```
 
 Hinweise:
 - Damit ist die API per HTTPS von ueberall erreichbar, ohne den internen Actix-Port offenzulegen.
-- Mit `API_KEY` ist der Zugriff einfach abgesichert; spaeter kann an derselben Stelle staerkere Auth nachgezogen werden.
+- HTTPS ist fuer den Internetbetrieb weiterhin der saubere Zielzustand, auch wenn Auth spaeter nachgezogen wird.
 
 Rollback:
 ```bash

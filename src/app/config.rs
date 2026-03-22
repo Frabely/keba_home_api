@@ -14,7 +14,6 @@ pub struct AppConfig {
     pub db_path: String,
     pub http_bind: String,
     pub cors_allowed_origins: CorsAllowedOrigins,
-    pub api_key: Option<String>,
     pub debounce_samples: usize,
     pub station_id: Option<String>,
     pub status_log_interval_seconds: u64,
@@ -110,9 +109,6 @@ impl AppConfig {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
             cors_allowed_origins: parse_cors_allowed_origins(&lookup)?,
-            api_key: lookup("API_KEY")
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 3_usize)?,
             station_id: station_id.clone(),
             status_log_interval_seconds: parse_or_default(
@@ -315,7 +311,6 @@ mod tests {
         }
         assert_eq!(result.http_bind, "0.0.0.0:8080");
         assert_eq!(result.cors_allowed_origins, CorsAllowedOrigins::Any);
-        assert_eq!(result.api_key, None);
         assert_eq!(result.debounce_samples, 3);
         assert_eq!(result.station_id, None);
         assert_eq!(result.status_log_interval_seconds, 60);
@@ -471,27 +466,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_optional_api_key() {
-        let result = AppConfig::from_lookup(|key| match key {
-            "KEBA_IP" => Some("192.168.1.10".to_string()),
-            "API_KEY" => Some("secret-token".to_string()),
-            _ => None,
-        })
-        .expect("config should parse api key");
-
-        assert_eq!(result.api_key.as_deref(), Some("secret-token"));
-    }
-
-    #[test]
-    fn ignores_blank_api_key() {
-        let result = AppConfig::from_lookup(|key| match key {
-            "KEBA_IP" => Some("192.168.1.10".to_string()),
-            "API_KEY" => Some("   ".to_string()),
-            _ => None,
-        })
-        .expect("blank api key should be treated as disabled");
-
-        assert_eq!(result.api_key, None);
-    }
 }
