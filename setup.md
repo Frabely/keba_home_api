@@ -188,8 +188,8 @@ sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-
 
 ## API Smoke Check
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/health
-curl -s http://127.0.0.1:8080/api/v1/sessions/carport/latest
+curl -s http://127.0.0.1:65109/api/v1/health
+curl -s http://127.0.0.1:65109/api/v1/sessions/carport/latest
 ```
 
 ## Von ueberall erreichbar ohne Domain (direkt ueber oeffentliche IP)
@@ -197,7 +197,7 @@ Das ist der einfachste externe Betrieb, solange noch keine Domain vorhanden ist.
 
 1. API auf allen Interfaces lassen:
 ```bash
-sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:8080/' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:65109/' /etc/keba/keba-home-api-reader.env
 ```
 
 2. Fuer Browser-Zugriffe ohne feste Frontend-Domain CORS offen lassen:
@@ -206,26 +206,26 @@ sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=*|' /etc/keba/keba-
 sudo systemctl restart keba-home-api-reader
 ```
 
-3. Im Router TCP-Port `8080` auf die lokale Pi-IP weiterleiten, z. B.:
-- extern `8080` -> Raspberry Pi `192.168.178.50:8080`
+3. Im Router TCP-Port `65109` auf die lokale Pi-IP weiterleiten, z. B.:
+- extern `65109` -> Raspberry Pi `192.168.178.50:65109`
 
 4. Extern erreichbare URLs:
 ```text
-http://<OEFFENTLICHE_IP>:8080/api/v1/health
-http://<OEFFENTLICHE_IP>:8080/api/v1/sessions/carport/latest
-http://<OEFFENTLICHE_IP>:8080/api/v1/sessions/entrance/latest
-http://<OEFFENTLICHE_IP>:8080/api/v1/unplug-log
+http://<OEFFENTLICHE_IP>:65109/api/v1/health
+http://<OEFFENTLICHE_IP>:65109/api/v1/sessions/carport/latest
+http://<OEFFENTLICHE_IP>:65109/api/v1/sessions/entrance/latest
+http://<OEFFENTLICHE_IP>:65109/api/v1/unplug-log
 ```
 
 Beispiel:
 ```text
-http://84.123.45.67:8080/api/v1/health
+http://84.123.45.67:65109/api/v1/health
 ```
 
 5. Lokal und extern testen:
 ```bash
-curl -i http://127.0.0.1:8080/api/v1/health
-curl -i http://<OEFFENTLICHE_IP>:8080/api/v1/sessions/carport/latest
+curl -i http://127.0.0.1:65109/api/v1/health
+curl -i http://<OEFFENTLICHE_IP>:65109/api/v1/sessions/carport/latest
 ```
 
 Hinweise:
@@ -235,11 +235,11 @@ Hinweise:
 - Dieses Setup laeuft unverschluesselt ueber HTTP und derzeit ohne Authentifizierung.
 
 ## Von ueberall erreichbar (empfohlen: Caddy + HTTPS)
-Wenn die API wirklich aus dem Internet erreichbar sein soll, nicht den nackten Port `8080` direkt weiterleiten. Besser: API lokal halten und per Reverse Proxy auf `443` publizieren.
+Wenn die API wirklich aus dem Internet erreichbar sein soll, nicht den nackten Port `65109` direkt weiterleiten. Besser: API lokal halten und per Reverse Proxy auf `443` publizieren.
 
 1. API intern auf Loopback binden:
 ```bash
-sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=127.0.0.1:8080/' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=127.0.0.1:65109/' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 
@@ -260,7 +260,7 @@ Danach Domain von `api.example.com` auf deine echte Domain/DynDNS aendern.
 4. Router/Netz:
 - DynDNS oder feste Domain auf deine oeffentliche IP zeigen lassen.
 - TCP `80` und `443` auf den Raspberry Pi weiterleiten.
-- Optional Pi-Firewall nur fuer `80/443` oeffnen; `8080` extern geschlossen lassen.
+- Optional Pi-Firewall nur fuer `80/443` oeffnen; `65109` extern geschlossen lassen.
 
 5. Caddy starten:
 ```bash
@@ -280,7 +280,7 @@ Hinweise:
 
 Rollback:
 ```bash
-sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:8080/' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:65109/' /etc/keba/keba-home-api-reader.env
 sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=*|' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```

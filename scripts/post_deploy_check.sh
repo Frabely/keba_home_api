@@ -131,7 +131,7 @@ for unit in "${SERVICES[@]}"; do
 done
 
 echo "[8/8] API checks"
-health_json="$(curl -fsS http://127.0.0.1:8080/api/v1/health)"
+health_json="$(curl -fsS http://127.0.0.1:65109/api/v1/health)"
 health_status="$(parse_json_field "${health_json}" "status" || true)"
 if [[ "${health_status}" != "ok" ]]; then
   echo "health check failed: ${health_json}" >&2
@@ -139,7 +139,7 @@ if [[ "${health_status}" != "ok" ]]; then
 fi
 echo "${health_json}"
 
-carport_json="$(curl -fsS http://127.0.0.1:8080/api/v1/sessions/carport/latest)"
+carport_json="$(curl -fsS http://127.0.0.1:65109/api/v1/sessions/carport/latest)"
 if parse_json_field "${carport_json}" "error" >/dev/null 2>&1; then
   echo "carport latest returned error payload: ${carport_json}"
 else

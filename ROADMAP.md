@@ -67,7 +67,7 @@
     - `KEBA_UDP_PORT` (default 7090)
     - `POLL_INTERVAL_MS` (default 20000)
     - `DB_PATH` (z. B. `/var/lib/keba/keba.db`)
-    - `HTTP_BIND` (z. B. `0.0.0.0:8080`)
+    - `HTTP_BIND` (z. B. `0.0.0.0:65109`)
     - Optional: `DEBOUNCE_SAMPLES` (default 3)
     - Optional: mögliche Key-Namen:
         - Status/Plug: `Plug`, `State` etc.
@@ -160,6 +160,6 @@
 5. API v1 umfasst nur `GET /health`, `GET /sessions/latest`, `GET /sessions`.
 6. v1 ohne Auth im Heimnetz, aber mit vorbereitetem Auth-Extension-Point.
 7. Deployment v1: Raspberry Pi + systemd; Docker später optional.
-8. Defaults übernehmen: `DB_PATH=/var/lib/keba/keba.db`, `HTTP_BIND=0.0.0.0:8080`.
+8. Defaults übernehmen: `DB_PATH=/var/lib/keba/keba.db`, `HTTP_BIND=0.0.0.0:65109`.
 9. Debounce-Default: `3` (konfigurierbar).
 10. Kein Dev-Simulationsendpoint in v1-Prodpfad; optional später hinter Feature-Flag.

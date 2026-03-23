@@ -107,7 +107,7 @@ impl AppConfig {
             http_bind: lookup("HTTP_BIND")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+                .unwrap_or_else(|| "0.0.0.0:65109".to_string()),
             cors_allowed_origins: parse_cors_allowed_origins(&lookup)?,
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 3_usize)?,
             station_id: station_id.clone(),
@@ -309,7 +309,7 @@ mod tests {
         } else {
             assert_eq!(result.db_path, "/var/lib/keba/keba.db");
         }
-        assert_eq!(result.http_bind, "0.0.0.0:8080");
+        assert_eq!(result.http_bind, "0.0.0.0:65109");
         assert_eq!(result.cors_allowed_origins, CorsAllowedOrigins::Any);
         assert_eq!(result.debounce_samples, 3);
         assert_eq!(result.station_id, None);

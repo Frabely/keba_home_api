@@ -8,12 +8,12 @@ Browser-Zugriffe werden ueber `CORS_ALLOWED_ORIGINS` gesteuert; Default ist aktu
 
 Ohne Domain lautet der Host einfach:
 ```text
-http://<OEFFENTLICHE_IP>:8080
+http://<OEFFENTLICHE_IP>:65109
 ```
 
 Beispiel:
 ```text
-http://84.123.45.67:8080/api/v1/health
+http://84.123.45.67:65109/api/v1/health
 ```
 
 ## Auth
@@ -26,7 +26,7 @@ Health check endpoint.
 
 Example:
 ```bash
-curl -s http://localhost:8080/api/v1/health | jq
+curl -s http://localhost:65109/api/v1/health | jq
 ```
 
 Response `200`:
@@ -44,7 +44,7 @@ The API takes the first report where `started > 0`, `ended > 0` and `E Pres >= 0
 
 Example:
 ```bash
-curl -s http://localhost:8080/api/v1/sessions/carport/latest | jq
+curl -s http://localhost:65109/api/v1/sessions/carport/latest | jq
 ```
 
 Response `200`:
@@ -65,7 +65,7 @@ Same contract as `/sessions/carport/latest`, but for station `entrance`.
 
 Example:
 ```bash
-curl -s http://localhost:8080/api/v1/sessions/entrance/latest | jq
+curl -s http://localhost:65109/api/v1/sessions/entrance/latest | jq
 ```
 
 Response `200`: same JSON shape as above.
@@ -78,8 +78,8 @@ Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp
 
 Beispiele:
 ```bash
-curl -s "http://localhost:8080/api/v1/unplug-log?count=5" | jq
-curl -s "http://localhost:8080/api/v1/unplug-log" | jq
+curl -s "http://localhost:65109/api/v1/unplug-log?count=5" | jq
+curl -s "http://localhost:65109/api/v1/unplug-log" | jq
 ```
 
 Response `200`:
