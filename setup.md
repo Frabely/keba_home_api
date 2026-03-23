@@ -97,7 +97,7 @@ Wichtig:
 - Fuer die API-Endpunkte `GET /api/v1/sessions/carport/latest` und `GET /api/v1/sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
 - Die kanonischen API-Endpunkte liegen unter `/api/v1` (Legacy-Rootpfade bleiben zunaechst aktiv).
 - Die API ist aktuell bewusst ohne Auth fuer Readonly-Zugriffe erreichbar.
-- `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default `*` ist fuer den oeffentlichen Direktzugriff offen; spaeter auf feste Origins reduzieren.
+- `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default sind `http://localhost:3000` und `https://invessiv.de`; fuer zusaetzliche produktive Frontends eine kommagetrennte Allow-List setzen.
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash
@@ -200,9 +200,9 @@ Das ist der einfachste externe Betrieb, solange noch keine Domain vorhanden ist.
 sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:65109/' /etc/keba/keba-home-api-reader.env
 ```
 
-2. Fuer Browser-Zugriffe ohne feste Frontend-Domain CORS offen lassen:
+2. Fuer Browser-Zugriffe vom lokalen Dev-Frontend und optional weiteren bekannten Frontends die Allow-List setzen:
 ```bash
-sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=*|' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=http://localhost:3000,https://invessiv.de|' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 
@@ -243,9 +243,9 @@ sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=127.0.0.1:65109/' /etc/keba/keba-home-api
 sudo systemctl restart keba-home-api-reader
 ```
 
-2. CORS fuer deinen spaeteren Frontend-Ursprung setzen:
+2. CORS fuer dein lokales Frontend plus spaeteren Frontend-Ursprung setzen:
 ```bash
-sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://app.example.com|' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=http://localhost:3000,https://invessiv.de,https://app.example.com|' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 
@@ -281,7 +281,7 @@ Hinweise:
 Rollback:
 ```bash
 sudo sed -i 's/^HTTP_BIND=.*/HTTP_BIND=0.0.0.0:65109/' /etc/keba/keba-home-api-reader.env
-sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=*|' /etc/keba/keba-home-api-reader.env
+sudo sed -i 's|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=http://localhost:3000,https://invessiv.de|' /etc/keba/keba-home-api-reader.env
 sudo systemctl restart keba-home-api-reader
 ```
 

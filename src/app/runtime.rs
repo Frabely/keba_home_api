@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use actix_cors::Cors;
+use actix_web::http::{Method, header};
 use actix_web::{App, HttpServer, web};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
@@ -626,8 +627,8 @@ fn run_debug_replay_loop(
 
 fn build_cors(cors_allowed_origins: &CorsAllowedOrigins) -> Cors {
     let cors = Cors::default()
-        .allow_any_method()
-        .allow_any_header()
+        .allowed_methods([Method::GET, Method::OPTIONS])
+        .allowed_headers([header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE])
         .max_age(3600);
 
     match cors_allowed_origins {
@@ -769,10 +770,13 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn cors_allows_any_origin_when_not_restricted() {
+    async fn cors_allows_default_localhost_origin_and_preflight_headers() {
         let app = actix_web::test::init_service(
             App::new()
-                .wrap(super::build_cors(&CorsAllowedOrigins::Any))
+                .wrap(super::build_cors(&CorsAllowedOrigins::Exact(vec![
+                    "http://localhost:3000".to_string(),
+                    "https://invessiv.de".to_string(),
+                ])))
                 .route(
                     "/health",
                     web::get().to(|| async { HttpResponse::Ok().finish() }),
@@ -783,15 +787,62 @@ mod tests {
         let req = actix_web::test::TestRequest::default()
             .method(Method::OPTIONS)
             .uri("/health")
-            .insert_header((header::ORIGIN, "https://remote.example.com"))
+            .insert_header((header::ORIGIN, "http://localhost:3000"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&header::HeaderValue::from_static("http://localhost:3000"))
+        );
+        let allow_methods = resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("preflight response should include allow-methods")
+            .to_str()
+            .expect("allow-methods should be valid ascii");
+        assert!(allow_methods.contains("GET"));
+        assert!(allow_methods.contains("OPTIONS"));
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .expect("preflight response should include allow-headers")
+                .to_str()
+                .expect("allow-headers should be valid ascii")
+                .contains("content-type")
+        );
+    }
+
+    #[actix_web::test]
+    async fn cors_allows_default_invessiv_origin() {
+        let app = actix_web::test::init_service(
+            App::new()
+                .wrap(super::build_cors(&CorsAllowedOrigins::Exact(vec![
+                    "http://localhost:3000".to_string(),
+                    "https://invessiv.de".to_string(),
+                ])))
+                .route(
+                    "/health",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .insert_header((header::ORIGIN, "https://invessiv.de"))
             .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        assert_eq!(
+            resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&header::HeaderValue::from_static("https://invessiv.de"))
         );
     }
 

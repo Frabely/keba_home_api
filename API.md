@@ -4,7 +4,7 @@ All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
 JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`) and `/unplug-log` response fields (`Id`, `Timestamp`, `Station`, `Started`, `Ended`, `Wh`, `CardId`).
 Die kanonischen Endpunkte liegen unter `/api/v1`.
 Die bisherigen Root-Pfade ohne `/api/v1` bleiben vorerst aus Kompatibilitaetsgruenden erreichbar.
-Browser-Zugriffe werden ueber `CORS_ALLOWED_ORIGINS` gesteuert; Default ist aktuell `*`.
+Browser-Zugriffe werden ueber `CORS_ALLOWED_ORIGINS` gesteuert; Default sind `http://localhost:3000` und `https://invessiv.de`.
 
 Ohne Domain lautet der Host einfach:
 ```text
@@ -132,10 +132,12 @@ or
 
 Default:
 ```bash
-CORS_ALLOWED_ORIGINS=*
+CORS_ALLOWED_ORIGINS=http://localhost:3000
 ```
 
 Restriktiver Betrieb mit bekannter Frontend-Origin:
 ```bash
-CORS_ALLOWED_ORIGINS=https://app.example.com,https://phone.example.com
+CORS_ALLOWED_ORIGINS=http://localhost:3000,https://invessiv.de
 ```
+
+Die API beantwortet CORS-Preflights direkt ueber die Actix-CORS-Middleware und erlaubt dabei mindestens `GET` und `OPTIONS` sowie die Header `Accept`, `Authorization` und `Content-Type`.

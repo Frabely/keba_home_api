@@ -33,6 +33,8 @@ pub enum CorsAllowedOrigins {
     Exact(Vec<String>),
 }
 
+const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 2] = ["http://localhost:3000", "https://invessiv.de"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusStationConfig {
     pub name: String,
@@ -249,7 +251,12 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let Some(raw) = lookup("CORS_ALLOWED_ORIGINS") else {
-        return Ok(CorsAllowedOrigins::Any);
+        return Ok(CorsAllowedOrigins::Exact(
+            DEFAULT_CORS_ALLOWED_ORIGINS
+                .into_iter()
+                .map(ToString::to_string)
+                .collect(),
+        ));
     };
 
     let trimmed = raw.trim();
@@ -310,7 +317,13 @@ mod tests {
             assert_eq!(result.db_path, "/var/lib/keba/keba.db");
         }
         assert_eq!(result.http_bind, "0.0.0.0:65109");
-        assert_eq!(result.cors_allowed_origins, CorsAllowedOrigins::Any);
+        assert_eq!(
+            result.cors_allowed_origins,
+            CorsAllowedOrigins::Exact(vec![
+                "http://localhost:3000".to_string(),
+                "https://invessiv.de".to_string()
+            ])
+        );
         assert_eq!(result.debounce_samples, 3);
         assert_eq!(result.station_id, None);
         assert_eq!(result.status_log_interval_seconds, 60);
