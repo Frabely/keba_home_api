@@ -123,6 +123,6 @@ Du bewertest anhand der Roadmap den notwendigen Projektzuschnitt (MVP vs. skalie
 5. API v1 Scope: nur `health`, `sessions/latest`, `sessions`?
 6. Heimnetz ohne Auth akzeptiert oder direkt Token/API-Key?
 7. Deployment nur Raspberry Pi + systemd oder zusätzlich Docker?
-8. Defaults übernehmen (`/var/lib/keba/keba.db`, `0.0.0.0:8080`)?
+8. Defaults übernehmen (`/var/lib/keba/keba.db`, `0.0.0.0:65109`)?
 9. Debounce-Default `2` oder `3`?
 10. Dev-Testendpoint für Session-Simulation gewünscht?
