@@ -72,6 +72,39 @@ Response `200`: same JSON shape as above.
 
 Legacy compatibility path: `GET /sessions/entrance/latest`
 
+## `GET /api/v1/dachs/status`
+Liest Dachs-Betriebsdaten ueber den konfigurierten HTTP-Upstream `DACHS_BASE_URL/getKey` und mapped die angeforderten Keys auf stabile API-Felder.
+Wenn gesetzt, werden `DACHS_USERNAME` und `DACHS_PASSWORD` direkt in die Upstream-URL eingebettet, also im Stil `http://user:pass@host/getKey?...`.
+
+Example:
+```bash
+curl -s http://localhost:65109/api/v1/dachs/status | jq
+```
+
+Response `200`:
+```json
+{
+  "starts": 476,
+  "bh": 47088.02,
+  "electricityInternal": 12345.678,
+  "heat": 98765.432,
+  "maintenance": 3099.496,
+  "buderusStarts": 91,
+  "buderusBh": 2468.1
+}
+```
+
+Mapping:
+- `starts` <= `Hka_Bd.ulAnzahlStarts`
+- `bh` <= `Hka_Bd.ulBetriebssekunden`
+- `electricityInternal` <= `Hka_Bd.ulArbeitElektr`
+- `heat` <= `Hka_Bd.ulArbeitThermHka`
+- `maintenance` <= `3500 - (Hka_Bd.ulBetriebssekunden - Wartung_Cache.ulBetriebssekundenBei)`
+- `buderusStarts` <= `Brenner_Bd.ulAnzahlStarts`
+- `buderusBh` <= `Brenner_Bd.ulBetriebssekunden`
+
+Legacy compatibility path: `GET /dachs/status`
+
 ## `GET /api/v1/unplug-log?count={x}`
 Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp DESC, Id DESC`.
 `count` entspricht einem SQL-`LIMIT` (vergleichbar mit `SELECT TOP x ...`) und ist optional.
@@ -125,6 +158,20 @@ or
 ```json
 {
   "error": "reports 100-130 do not contain started/end timestamps and E Pres >= 0"
+}
+```
+
+`503` (Dachs endpoint disabled):
+```json
+{
+  "error": "dachs status endpoint is not configured"
+}
+```
+
+`502` (Dachs upstream/payload issue):
+```json
+{
+  "error": "failed to fetch dachs status: dachs upstream request failed: ..."
 }
 ```
 

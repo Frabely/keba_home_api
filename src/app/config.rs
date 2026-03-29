@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     pub db_path: String,
     pub http_bind: String,
+    pub dachs_base_url: Option<String>,
+    pub dachs_username: Option<String>,
+    pub dachs_password: Option<String>,
     pub cors_allowed_origins: CorsAllowedOrigins,
     pub debounce_samples: usize,
     pub station_id: Option<String>,
@@ -110,6 +113,23 @@ impl AppConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "0.0.0.0:65109".to_string()),
+            dachs_base_url: match lookup("DACHS_BASE_URL") {
+                Some(raw) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => Some("http://192.168.233.99:8080".to_string()),
+            },
+            dachs_username: lookup("DACHS_USERNAME")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            dachs_password: lookup("DACHS_PASSWORD")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             cors_allowed_origins: parse_cors_allowed_origins(&lookup)?,
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 3_usize)?,
             station_id: station_id.clone(),
@@ -318,6 +338,12 @@ mod tests {
         }
         assert_eq!(result.http_bind, "0.0.0.0:65109");
         assert_eq!(
+            result.dachs_base_url,
+            Some("http://192.168.233.99:8080".to_string())
+        );
+        assert_eq!(result.dachs_username, None);
+        assert_eq!(result.dachs_password, None);
+        assert_eq!(
             result.cors_allowed_origins,
             CorsAllowedOrigins::Exact(vec![
                 "http://localhost:3000".to_string(),
@@ -479,4 +505,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn allows_disabling_dachs_endpoint_via_empty_env() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "DACHS_BASE_URL" => Some("   ".to_string()),
+            _ => None,
+        })
+        .expect("config should be valid");
+
+        assert_eq!(result.dachs_base_url, None);
+    }
+
+    #[test]
+    fn parses_optional_dachs_credentials() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "DACHS_USERNAME" => Some("service-user".to_string()),
+            "DACHS_PASSWORD" => Some("secret".to_string()),
+            _ => None,
+        })
+        .expect("config should be valid");
+
+        assert_eq!(result.dachs_username, Some("service-user".to_string()));
+        assert_eq!(result.dachs_password, Some("secret".to_string()));
+    }
 }

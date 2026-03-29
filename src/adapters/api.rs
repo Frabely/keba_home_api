@@ -3,6 +3,7 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::adapters::dachs_http::fetch_dachs_status;
 use crate::adapters::keba_udp::KebaUdpClient;
 use crate::app::services::{SessionQueryHandler, SqliteSessionService};
 
@@ -11,6 +12,10 @@ const API_V1_PREFIX: &str = "/api/v1";
 #[derive(Clone)]
 pub struct ApiState {
     pub report100_stations: Vec<Report100Station>,
+    pub dachs_base_url: Option<String>,
+    pub dachs_username: Option<String>,
+    pub dachs_password: Option<String>,
+    pub dachs_http_client: reqwest::Client,
     pub session_query_service: Option<SqliteSessionService>,
 }
 
@@ -61,18 +66,29 @@ pub struct UnplugLogResponse {
     pub card_id: String,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DachsStatusResponse {
+    pub starts: u64,
+    pub bh: f64,
+    pub electricity_internal: f64,
+    pub heat: f64,
+    pub maintenance: f64,
+    pub buderus_starts: u64,
+    pub buderus_bh: f64,
+}
+
 fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::resource("/unplug-log").route(web::get().to(get_unplug_log_events_endpoint)),
-    )
-    .service(
-        web::resource("/sessions/carport/latest")
-            .route(web::get().to(get_carport_latest_report100_endpoint)),
-    )
-    .service(
-        web::resource("/sessions/entrance/latest")
-            .route(web::get().to(get_entrance_latest_report100_endpoint)),
-    );
+    cfg.service(web::resource("/unplug-log").route(web::get().to(get_unplug_log_events_endpoint)))
+        .service(web::resource("/dachs/status").route(web::get().to(get_dachs_status_endpoint)))
+        .service(
+            web::resource("/sessions/carport/latest")
+                .route(web::get().to(get_carport_latest_report100_endpoint)),
+        )
+        .service(
+            web::resource("/sessions/entrance/latest")
+                .route(web::get().to(get_entrance_latest_report100_endpoint)),
+        );
 }
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -95,6 +111,36 @@ async fn get_carport_latest_report100_endpoint(state: web::Data<ApiState>) -> im
 
 async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> impl Responder {
     latest_report100_response(&state, "entrance")
+}
+
+async fn get_dachs_status_endpoint(state: web::Data<ApiState>) -> impl Responder {
+    let Some(base_url) = state.dachs_base_url.as_deref() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "dachs status endpoint is not configured"
+        }));
+    };
+
+    match fetch_dachs_status(
+        &state.dachs_http_client,
+        base_url,
+        state.dachs_username.as_deref(),
+        state.dachs_password.as_deref(),
+    )
+    .await
+    {
+        Ok(status) => HttpResponse::Ok().json(DachsStatusResponse {
+            starts: status.starts,
+            bh: status.bh,
+            electricity_internal: status.electricity_internal,
+            heat: status.heat,
+            maintenance: status.maintenance,
+            buderus_starts: status.buderus_starts,
+            buderus_bh: status.buderus_bh,
+        }),
+        Err(error) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("failed to fetch dachs status: {error}")
+        })),
+    }
 }
 
 async fn get_unplug_log_events_endpoint(
@@ -447,6 +493,10 @@ mod tests {
     fn empty_state() -> ApiState {
         ApiState {
             report100_stations: Vec::new(),
+            dachs_base_url: None,
+            dachs_username: None,
+            dachs_password: None,
+            dachs_http_client: reqwest::Client::new(),
             session_query_service: None,
         }
     }
@@ -549,6 +599,116 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn dachs_status_endpoint_maps_upstream_fields() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let request_capture = Arc::new(Mutex::new(String::new()));
+        let request_capture_responder = Arc::clone(&request_capture);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("addr should be available");
+
+        let responder_handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut buffer = [0_u8; 4096];
+            let size = stream
+                .read(&mut buffer)
+                .expect("request should be readable");
+            *request_capture_responder
+                .lock()
+                .expect("request capture mutex should be lockable") =
+                String::from_utf8_lossy(&buffer[..size]).to_string();
+
+            let body = r#"{
+                "Hka_Bd.ulAnzahlStarts": "476",
+                "Hka_Bd.ulBetriebssekunden": "47.088,020",
+                "Hka_Bd.ulArbeitElektr": "12.345,678",
+                "Hka_Bd.ulArbeitThermHka": "98.765,432",
+                "Wartung_Cache.ulBetriebssekundenBei": "46.687,516",
+                "Brenner_Bd.ulAnzahlStarts": "91",
+                "Brenner_Bd.ulBetriebssekunden": "2.468,100"
+            }"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should be writable");
+        });
+
+        let mut state = empty_state();
+        state.dachs_base_url = Some(format!("http://{addr}"));
+        state.dachs_username = Some("service-user".to_string());
+        state.dachs_password = Some("secret".to_string());
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["starts"], 476);
+        assert_eq!(json["bh"], 47_088.020);
+        assert_eq!(json["electricityInternal"], 12_345.678);
+        assert_eq!(json["heat"], 98_765.432);
+        assert_eq!(json["maintenance"], 3_099.496);
+        assert_eq!(json["buderusStarts"], 91);
+        assert_eq!(json["buderusBh"], 2_468.100);
+
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+
+        let request = request_capture
+            .lock()
+            .expect("request capture mutex should be lockable")
+            .clone();
+        assert!(request.contains("GET /getKey?"));
+        assert!(request.contains("k=Hka_Bd.ulAnzahlStarts"));
+        assert!(request.contains("k=Hka_Bd.ulBetriebssekunden"));
+        assert!(request.contains("k=Hka_Bd.ulArbeitElektr"));
+        assert!(request.contains("k=Hka_Bd.ulArbeitThermHka"));
+        assert!(request.contains("k=Wartung_Cache.ulBetriebssekundenBei"));
+        assert!(request.contains("k=Brenner_Bd.ulAnzahlStarts"));
+        assert!(request.contains("k=Brenner_Bd.ulBetriebssekunden"));
+    }
+
+    #[actix_web::test]
+    async fn dachs_status_endpoint_returns_503_when_disabled() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["error"], "dachs status endpoint is not configured");
     }
 
     #[actix_web::test]
