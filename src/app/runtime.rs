@@ -400,14 +400,48 @@ fn parse_session_timestamp_ms_from_object(
         return Some(numeric_timestamp_ms);
     }
     if let Some(sec_now) = sec_from_report
-        && let Some(raw_seconds) = parse_f64(value)
-        && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
+        && let Some(raw_numeric) = parse_f64(value)
+        && (0.0..1_000_000_000_000.0).contains(&raw_numeric)
     {
-        let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
-        let ts_ms = ts.round() as i64;
-        if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        if let Some(ts_ms) =
+            parse_relative_timestamp_from_report_seconds(sec_now, raw_numeric, now_ms)
+        {
             return Some(ts_ms);
         }
+        if let Some(ts_ms) =
+            parse_relative_timestamp_from_report_millis(sec_now, raw_numeric, now_ms)
+        {
+            return Some(ts_ms);
+        }
+    }
+
+    None
+}
+
+fn parse_relative_timestamp_from_report_seconds(
+    sec_now: f64,
+    raw_seconds: f64,
+    now_ms: i64,
+) -> Option<i64> {
+    let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
+    let ts_ms = ts.round() as i64;
+    if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        return Some(ts_ms);
+    }
+
+    None
+}
+
+fn parse_relative_timestamp_from_report_millis(
+    sec_now: f64,
+    raw_millis: f64,
+    now_ms: i64,
+) -> Option<i64> {
+    let sec_now_ms = sec_now * 1000.0;
+    let ts = (now_ms as f64) - (sec_now_ms - raw_millis);
+    let ts_ms = ts.round() as i64;
+    if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        return Some(ts_ms);
     }
 
     None

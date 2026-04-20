@@ -429,15 +429,49 @@ fn parse_session_timestamp_ms(
     }
 
     if let Some(sec_now) = sec_from_report100
-        && let Some(raw_seconds) = parse_number(value)
-        && (0.0..1_000_000_000_000.0).contains(&raw_seconds)
+        && let Some(raw_numeric) = parse_number(value)
+        && (0.0..1_000_000_000_000.0).contains(&raw_numeric)
     {
-        let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
-        let ts_ms = ts.round() as i64;
-        if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        if let Some(ts_ms) =
+            parse_relative_timestamp_from_report_seconds(sec_now, raw_numeric, now_ms)
+        {
+            return Some(ts_ms);
+        }
+        if let Some(ts_ms) =
+            parse_relative_timestamp_from_report_millis(sec_now, raw_numeric, now_ms)
+        {
             return Some(ts_ms);
         }
     }
+    None
+}
+
+fn parse_relative_timestamp_from_report_seconds(
+    sec_now: f64,
+    raw_seconds: f64,
+    now_ms: i64,
+) -> Option<i64> {
+    let ts = (now_ms as f64) - ((sec_now - raw_seconds) * 1000.0);
+    let ts_ms = ts.round() as i64;
+    if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        return Some(ts_ms);
+    }
+
+    None
+}
+
+fn parse_relative_timestamp_from_report_millis(
+    sec_now: f64,
+    raw_millis: f64,
+    now_ms: i64,
+) -> Option<i64> {
+    let sec_now_ms = sec_now * 1000.0;
+    let ts = (now_ms as f64) - (sec_now_ms - raw_millis);
+    let ts_ms = ts.round() as i64;
+    if is_plausible_absolute_timestamp_ms(ts_ms, now_ms) {
+        return Some(ts_ms);
+    }
+
     None
 }
 
@@ -1664,6 +1698,96 @@ mod tests {
         assert_eq!(json["kWh"], 8198.4);
         assert_eq!(json["reportId"], 100);
         assert_eq!(json["CardId"], "SSEC2");
+
+        let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
+        shutdown_socket
+            .send_to(
+                b"shutdown-test-responder",
+                format!("127.0.0.1:{responder_port}"),
+            )
+            .expect("shutdown message should be sent");
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+    }
+
+    #[actix_web::test]
+    async fn carport_latest_endpoint_accepts_millisecond_session_counters_after_reboot() {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder socket should bind");
+        responder
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should be configurable");
+        let responder_port = responder
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            while let Ok((size, from)) = responder.recv_from(&mut buffer) {
+                let cmd = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                if cmd == "shutdown-test-responder" {
+                    break;
+                }
+                let payload = match cmd.as_str() {
+                    "report 100" => {
+                        r#"{"E Pres":0,"Sec":7240,"started[s]":0,"ended[s]":0,"RFID tag":"R100"}"#
+                    }
+                    "report 101" => {
+                        r#"{"E Pres":52226,"Sec":7250,"started[s]":4250267,"ended[s]":4255979,"started":"4250267000","ended":"4255979000","RFID tag":"R101"}"#
+                    }
+                    _ => continue,
+                };
+                responder
+                    .send_to(payload.as_bytes(), from)
+                    .expect("responder send should succeed");
+            }
+        });
+
+        let mut state = empty_state();
+        state.report100_stations = vec![Report100Station {
+            logical_name: "carport".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: responder_port,
+        }];
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let now_before = Utc::now().timestamp_millis();
+        let req = test::TestRequest::get()
+            .uri("/sessions/carport/latest")
+            .insert_header(("X-API-Key", "1r0m"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let now_after = Utc::now().timestamp_millis();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+
+        let sec_now = 7_250.0_f64;
+        let started_raw = 4_250_267.0_f64;
+        let ended_raw = 4_255_979.0_f64;
+        let expected_started_min =
+            (now_before as f64 - ((sec_now * 1000.0) - started_raw)) as i64 - 2000;
+        let expected_started_max =
+            (now_after as f64 - ((sec_now * 1000.0) - started_raw)) as i64 + 2000;
+        let expected_ended_min = (now_before as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 - 2000;
+        let expected_ended_max = (now_after as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 + 2000;
+
+        let started = json["started"].as_i64().expect("started should be i64");
+        let ended = json["ended"].as_i64().expect("ended should be i64");
+        assert!(started >= expected_started_min && started <= expected_started_max);
+        assert!(ended >= expected_ended_min && ended <= expected_ended_max);
+        assert_eq!(json["kWh"], 5222.6);
+        assert_eq!(json["reportId"], 101);
+        assert_eq!(json["CardId"], "R101");
 
         let shutdown_socket = UdpSocket::bind("127.0.0.1:0").expect("shutdown socket should bind");
         shutdown_socket
