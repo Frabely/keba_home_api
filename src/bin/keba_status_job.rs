@@ -18,12 +18,12 @@ struct Station {
 const STATIONS: &[Station] = &[
     Station {
         name: "KEBA Carport",
-        ip: "192.168.233.98",
+        ip: "192.168.233.99",
         port: 7090,
     },
     Station {
         name: "KEBA Eingang",
-        ip: "192.168.233.91",
+        ip: "192.168.233.98",
         port: 7090,
     },
 ];

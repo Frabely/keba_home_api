@@ -363,7 +363,7 @@ Brenner_Bd.ulBetriebssekunden=22\n";
     #[test]
     fn builds_upstream_url_with_embedded_credentials() {
         let url = build_dachs_status_url(
-            "http://192.168.233.99:8080",
+            "http://192.168.233.91:8080",
             Some("glt"),
             Some("HECHT"),
         )
@@ -371,7 +371,7 @@ Brenner_Bd.ulBetriebssekunden=22\n";
 
         assert_eq!(
             url.as_str(),
-            "http://glt:HECHT@192.168.233.99:8080/getKey?k=Hka_Bd.ulAnzahlStarts&k=Hka_Bd.ulBetriebssekunden&k=Hka_Bd.ulArbeitElektr&k=Hka_Bd.ulArbeitThermHka&k=Wartung_Cache.ulBetriebssekundenBei&k=Brenner_Bd.ulAnzahlStarts&k=Brenner_Bd.ulBetriebssekunden"
+            "http://glt:HECHT@192.168.233.91:8080/getKey?k=Hka_Bd.ulAnzahlStarts&k=Hka_Bd.ulBetriebssekunden&k=Hka_Bd.ulArbeitElektr&k=Hka_Bd.ulArbeitThermHka&k=Wartung_Cache.ulBetriebssekundenBei&k=Brenner_Bd.ulAnzahlStarts&k=Brenner_Bd.ulBetriebssekunden"
         );
     }
 }

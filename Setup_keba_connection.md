@@ -3,8 +3,8 @@
 ## Geräte / Adressen (LAN)
 | Wallbox | IP (LAN) | UDP Port (KEBA UDP Interface) |
 |---|---:|---:|
-| KEBA (Carport) | `192.168.233.98` | `7090/UDP` |
-| KEBA (Eingang) | `192.168.233.91` | `7090/UDP` |
+| KEBA (Carport) | `192.168.233.99` | `7090/UDP` |
+| KEBA (Eingang) | `192.168.233.98` | `7090/UDP` |
 
 > Für die Auswertung im Heimnetz nutzt du immer die **LAN-IP + UDP 7090**.
 
@@ -20,7 +20,7 @@
 Die Werte sind i.d.R. in **0,1 Wh**:
 - `kWh = Wert / 10000`
 
-Beispiel von `192.168.233.98`:
+Beispiel von `192.168.233.99`:
 - `E pres = 41210` → `41210 / 10000 = 4.121 kWh`
 - `E total = 283467494` → `283467494 / 10000 = 28346.749 kWh`
 
@@ -36,12 +36,12 @@ Aus `report 2` kannst du stabil ableiten:
   (State-Werte können je nach Firmware/Setup unterschiedlich interpretiert werden)
 
 ### Einordnung deiner aktuellen Werte
-- `192.168.233.98`
+- `192.168.233.99`
     - `report 2`: `State=2`, `Plug=7`, `Enable sys=1`, `Enable user=1`, `Max curr=32000`
     - ⇒ **angesteckt**, **freigegeben**, **lädt aktuell nicht** (siehe `report 3`: `P=0`)
     - `report 3`: `P=0`, `E pres=41210`, `E total=283467494`
 
-- `192.168.233.91`
+- `192.168.233.98`
     - `report 2`: `State=5`, `Plug=7`, `Enable sys=0`, `Enable user=0`, `Max curr=0`
     - ⇒ **angesteckt**, aber **gesperrt/deaktiviert (0 A freigegeben)**, kein Fehler (`Error1/2=0`)
 
@@ -74,7 +74,7 @@ function Get-KebaUdpReport {
 }
 
 # Beispiele:
+Get-KebaUdpReport -Ip "192.168.233.99" -ReportId 2
+Get-KebaUdpReport -Ip "192.168.233.99" -ReportId 3
 Get-KebaUdpReport -Ip "192.168.233.98" -ReportId 2
 Get-KebaUdpReport -Ip "192.168.233.98" -ReportId 3
-Get-KebaUdpReport -Ip "192.168.233.91" -ReportId 2
-Get-KebaUdpReport -Ip "192.168.233.91" -ReportId 3

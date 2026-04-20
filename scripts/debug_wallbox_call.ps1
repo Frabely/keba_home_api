@@ -1,4 +1,4 @@
-$ip = "192.168.233.91"   # oder 192.168.233.98
+$ip = "192.168.233.99"   # oder 192.168.233.98
 $timeoutMs = 3000
 
 $udp = New-Object System.Net.Sockets.UdpClient(7090)

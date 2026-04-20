@@ -94,11 +94,11 @@ Wichtig:
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-carport.env` auf die Carport-Wallbox-IP.
 - Setze `KEBA_IP` in `/etc/keba/keba-home-service-eingang.env` auf die Eingang-Wallbox-IP.
 - `POLL_INTERVAL_MS` Default fuer Writer ist `20000` (20 Sekunden), falls der Wert in der ENV nicht gesetzt ist.
-- Fuer die API-Endpunkte `GET /api/v1/sessions/carport/latest` und `GET /api/v1/sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.1.20:7090;Eingang@192.168.1.21:7090`).
+- Fuer die API-Endpunkte `GET /api/v1/sessions/carport/latest` und `GET /api/v1/sessions/entrance/latest` muss in der API-ENV `STATUS_STATIONS` beide Stationen mit Namen enthalten, die `carport` bzw. `entrance`/`eingang` matchen (z. B. `Carport@192.168.233.99:7090;Eingang@192.168.233.98:7090`).
 - Die kanonischen API-Endpunkte liegen unter `/api/v1` (Legacy-Rootpfade bleiben zunaechst aktiv).
 - Die API ist aktuell bewusst ohne Auth fuer Readonly-Zugriffe erreichbar.
 - `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default sind `http://localhost:3000` und `https://invessiv.de`; fuer zusaetzliche produktive Frontends eine kommagetrennte Allow-List setzen.
-- `DACHS_BASE_URL` steuert den HTTP-Upstream fuer `GET /api/v1/dachs/status`. Default ist `http://192.168.233.99:8080`; mit leerem Wert wird der Endpoint bewusst deaktiviert.
+- `DACHS_BASE_URL` steuert den HTTP-Upstream fuer `GET /api/v1/dachs/status`. Default ist `http://192.168.233.91:8080`; mit leerem Wert wird der Endpoint bewusst deaktiviert.
 - `DACHS_USERNAME` und `DACHS_PASSWORD` sind optional. Wenn gesetzt, bettet die API sie direkt in die Dachs-Upstream-URL ein, also `http://user:pass@host/getKey?...`.
 - Zum Schreiben der API-ENV auf dem Raspberry Pi liegt ein Hilfsskript unter `scripts/write_pi_api_env.sh`. Es schreibt standardmaessig nach `/etc/keba/keba-home-api-reader.env`; Werte koennen vor dem Aufruf per ENV ueberschrieben werden, z. B. `STATUS_STATIONS=... DACHS_USERNAME=... DACHS_PASSWORD=... bash scripts/write_pi_api_env.sh`.
 

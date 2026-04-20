@@ -122,7 +122,7 @@ impl AppConfig {
                         Some(trimmed.to_string())
                     }
                 }
-                None => Some("http://192.168.233.99:8080".to_string()),
+                None => Some("http://192.168.233.91:8080".to_string()),
             },
             dachs_username: lookup("DACHS_USERNAME")
                 .map(|v| v.trim().to_string())
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(result.http_bind, "0.0.0.0:65109");
         assert_eq!(
             result.dachs_base_url,
-            Some("http://192.168.233.99:8080".to_string())
+            Some("http://192.168.233.91:8080".to_string())
         );
         assert_eq!(result.dachs_username, None);
         assert_eq!(result.dachs_password, None);
