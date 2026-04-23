@@ -4,6 +4,9 @@ mod logging;
 mod runtime;
 pub mod services;
 
+pub use config::{
+    AppConfig, CorsAllowedOrigins, DachsDeviceConfig, KebaSource, StatusStationConfig,
+};
 pub use error::AppError;
 
 pub fn run() -> Result<(), AppError> {
@@ -59,9 +62,8 @@ fn log_bootstrap(mode: &str, config: &config::AppConfig) {
         poll_interval_ms = config.poll_interval_ms,
         db_path = %config.db_path,
         http_bind = %config.http_bind,
-        dachs_base_url = ?config.dachs_base_url,
-        dachs_username_configured = config.dachs_username.is_some(),
-        dachs_password_configured = config.dachs_password.is_some(),
+        dachs_f233_configured = config.dachs_f233.is_some(),
+        dachs_f235_configured = config.dachs_f235.is_some(),
         debounce_samples = config.debounce_samples,
         status_log_interval_seconds = config.status_log_interval_seconds,
         status_station_count = config.status_stations.len(),

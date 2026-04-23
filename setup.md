@@ -98,9 +98,11 @@ Wichtig:
 - Die kanonischen API-Endpunkte liegen unter `/api/v1` (Legacy-Rootpfade bleiben zunaechst aktiv).
 - Die API ist aktuell bewusst ohne Auth fuer Readonly-Zugriffe erreichbar.
 - `CORS_ALLOWED_ORIGINS` steuert Browserzugriffe. Default sind `http://localhost:3000` und `https://invessiv.de`; fuer zusaetzliche produktive Frontends eine kommagetrennte Allow-List setzen.
-- `DACHS_BASE_URL` steuert den HTTP-Upstream fuer `GET /api/v1/dachs/status`. Default ist `http://192.168.233.91:8080`; mit leerem Wert wird der Endpoint bewusst deaktiviert.
-- `DACHS_USERNAME` und `DACHS_PASSWORD` sind optional. Wenn gesetzt, bettet die API sie direkt in die Dachs-Upstream-URL ein, also `http://user:pass@host/getKey?...`.
-- Zum Schreiben der API-ENV auf dem Raspberry Pi liegt ein Hilfsskript unter `scripts/write_pi_api_env.sh`. Es schreibt standardmaessig nach `/etc/keba/keba-home-api-reader.env`; Werte koennen vor dem Aufruf per ENV ueberschrieben werden, z. B. `STATUS_STATIONS=... DACHS_USERNAME=... DACHS_PASSWORD=... bash scripts/write_pi_api_env.sh`.
+- `DACHS_F233_BASE_URL`, `DACHS_F233_USERNAME` und `DACHS_F233_PASSWORD` steuern den HTTP-Upstream fuer `GET /api/v1/dachs/f233/status`. Default ist `http://192.168.233.91:8080`; Default-Credentials sind `GLT` / `HECHT`; mit leerem Wert wird der Endpoint bewusst deaktiviert.
+- `DACHS_F235_BASE_URL`, `DACHS_F235_USERNAME` und `DACHS_F235_PASSWORD` steuern den HTTP-Upstream fuer `GET /api/v1/dachs/f235/status`. Default ist `http://192.168.233.92:8080`; Default-Credentials sind `GLT` / `HECHT`; mit leerem Wert wird der Endpoint bewusst deaktiviert.
+- `f233` liest die Vollversion inkl. `Brenner_Bd.*` Felder; `f235` liest nur die gemeinsamen Felder ohne Buderus-Mapping.
+- Die API versucht HTTP Basic Auth schon dann, wenn mindestens eines von Username oder Passwort gesetzt ist. Fehlen beide Werte, geht der Request ohne Auth raus.
+- Zum Schreiben der API-ENV auf dem Raspberry Pi liegt ein Hilfsskript unter `scripts/write_pi_api_env.sh`. Es schreibt standardmaessig nach `/etc/keba/keba-home-api-reader.env`; Werte koennen vor dem Aufruf per ENV ueberschrieben werden, z. B. `STATUS_STATIONS=... DACHS_F233_USERNAME=... DACHS_F235_PASSWORD=... bash scripts/write_pi_api_env.sh`.
 
 4. Sicherstellen, dass alle dieselbe DB nutzen:
 ```bash
@@ -193,6 +195,9 @@ sudo systemctl restart keba-home-service@carport keba-home-service@eingang keba-
 ```bash
 curl -s http://127.0.0.1:65109/api/v1/health
 curl -s http://127.0.0.1:65109/api/v1/sessions/carport/latest
+curl -s http://127.0.0.1:65109/api/v1/dachs/f233/status
+# f235 uses the default upstream http://192.168.233.92:8080 unless overridden in the ENV
+curl -s http://127.0.0.1:65109/api/v1/dachs/f235/status
 ```
 
 ## Von ueberall erreichbar ohne Domain (direkt ueber oeffentliche IP)

@@ -13,15 +13,11 @@ const BUDERUS_START_COUNT_KEY: &str = "Brenner_Bd.ulAnzahlStarts";
 const BUDERUS_OPERATING_HOURS_KEY: &str = "Brenner_Bd.ulBetriebssekunden";
 const MAINTENANCE_INTERVAL_HOURS: f64 = 3_500.0;
 
-const REQUEST_KEYS: [&str; 7] = [
-    ENGINE_START_COUNT_KEY,
-    ENGINE_OPERATING_HOURS_KEY,
-    INTERNAL_ELECTRICITY_KEY,
-    HEAT_OUTPUT_KEY,
-    MAINTENANCE_BASELINE_HOURS_KEY,
-    BUDERUS_START_COUNT_KEY,
-    BUDERUS_OPERATING_HOURS_KEY,
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DachsRequestProfile {
+    F233,
+    F235,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DachsStatus {
@@ -30,8 +26,8 @@ pub struct DachsStatus {
     pub electricity_internal: f64,
     pub heat: f64,
     pub maintenance: f64,
-    pub buderus_starts: u64,
-    pub buderus_bh: f64,
+    pub buderus_starts: Option<u64>,
+    pub buderus_bh: Option<f64>,
 }
 
 #[derive(Debug, Error)]
@@ -51,10 +47,19 @@ pub async fn fetch_dachs_status(
     base_url: &str,
     username: Option<&str>,
     password: Option<&str>,
+    profile: DachsRequestProfile,
 ) -> Result<DachsStatus, DachsHttpError> {
-    let url = build_dachs_status_url(base_url, username, password)?;
-    let response = client
-        .get(url)
+    let url = build_dachs_status_url(base_url, profile)?;
+    let mut request = client.get(url);
+    let username = username
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let password = password.map(str::trim).filter(|value| !value.is_empty());
+    if !username.is_empty() || password.is_some() {
+        request = request.basic_auth(username, password);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| DachsHttpError::Transport(error.to_string()))?;
@@ -71,33 +76,21 @@ pub async fn fetch_dachs_status(
         });
     }
 
-    parse_dachs_status_payload(&body)
+    parse_dachs_status_payload(&body, profile)
 }
 
 fn build_dachs_status_url(
     base_url: &str,
-    username: Option<&str>,
-    password: Option<&str>,
+    profile: DachsRequestProfile,
 ) -> Result<Url, DachsHttpError> {
     let mut url = Url::parse(base_url)
         .map_err(|error| DachsHttpError::InvalidBaseUrl(error.to_string()))?
         .join("getKey")
         .map_err(|error| DachsHttpError::InvalidBaseUrl(error.to_string()))?;
 
-    if let Some(username) = username.filter(|value| !value.trim().is_empty()) {
-        url.set_username(username).map_err(|_| {
-            DachsHttpError::InvalidBaseUrl("dachs username contains invalid characters".to_string())
-        })?;
-    }
-    if let Some(password) = password.filter(|value| !value.trim().is_empty()) {
-        url.set_password(Some(password)).map_err(|_| {
-            DachsHttpError::InvalidBaseUrl("dachs password contains invalid characters".to_string())
-        })?;
-    }
-
     {
         let mut query = url.query_pairs_mut();
-        for key in REQUEST_KEYS {
+        for key in request_keys(profile) {
             query.append_pair("k", key);
         }
     }
@@ -105,7 +98,10 @@ fn build_dachs_status_url(
     Ok(url)
 }
 
-fn parse_dachs_status_payload(body: &str) -> Result<DachsStatus, DachsHttpError> {
+fn parse_dachs_status_payload(
+    body: &str,
+    profile: DachsRequestProfile,
+) -> Result<DachsStatus, DachsHttpError> {
     let values = parse_payload_map(body)?;
 
     let starts = parse_u64_value(&values, ENGINE_START_COUNT_KEY)?;
@@ -113,8 +109,14 @@ fn parse_dachs_status_payload(body: &str) -> Result<DachsStatus, DachsHttpError>
     let electricity_internal = parse_f64_value(&values, INTERNAL_ELECTRICITY_KEY)?;
     let heat = parse_f64_value(&values, HEAT_OUTPUT_KEY)?;
     let maintenance_at = parse_f64_value(&values, MAINTENANCE_BASELINE_HOURS_KEY)?;
-    let buderus_starts = parse_u64_value(&values, BUDERUS_START_COUNT_KEY)?;
-    let buderus_bh = parse_f64_value(&values, BUDERUS_OPERATING_HOURS_KEY)?;
+
+    let (buderus_starts, buderus_bh) = match profile {
+        DachsRequestProfile::F233 => (
+            Some(parse_u64_value(&values, BUDERUS_START_COUNT_KEY)?),
+            Some(parse_f64_value(&values, BUDERUS_OPERATING_HOURS_KEY)?),
+        ),
+        DachsRequestProfile::F235 => (None, None),
+    };
 
     Ok(DachsStatus {
         starts,
@@ -125,6 +127,27 @@ fn parse_dachs_status_payload(body: &str) -> Result<DachsStatus, DachsHttpError>
         buderus_starts,
         buderus_bh,
     })
+}
+
+fn request_keys(profile: DachsRequestProfile) -> &'static [&'static str] {
+    match profile {
+        DachsRequestProfile::F233 => &[
+            ENGINE_START_COUNT_KEY,
+            ENGINE_OPERATING_HOURS_KEY,
+            INTERNAL_ELECTRICITY_KEY,
+            HEAT_OUTPUT_KEY,
+            MAINTENANCE_BASELINE_HOURS_KEY,
+            BUDERUS_START_COUNT_KEY,
+            BUDERUS_OPERATING_HOURS_KEY,
+        ],
+        DachsRequestProfile::F235 => &[
+            ENGINE_START_COUNT_KEY,
+            ENGINE_OPERATING_HOURS_KEY,
+            INTERNAL_ELECTRICITY_KEY,
+            HEAT_OUTPUT_KEY,
+            MAINTENANCE_BASELINE_HOURS_KEY,
+        ],
+    }
 }
 
 fn parse_payload_map(body: &str) -> Result<HashMap<String, Value>, DachsHttpError> {
@@ -308,7 +331,9 @@ fn round_to_three_decimals(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DachsStatus, build_dachs_status_url, parse_dachs_status_payload};
+    use super::{
+        DachsRequestProfile, DachsStatus, build_dachs_status_url, parse_dachs_status_payload,
+    };
 
     #[test]
     fn parses_json_object_with_german_decimal_numbers() {
@@ -322,7 +347,8 @@ mod tests {
             "Brenner_Bd.ulBetriebssekunden": "2.468,100"
         }"#;
 
-        let parsed = parse_dachs_status_payload(payload).expect("payload should parse");
+        let parsed = parse_dachs_status_payload(payload, DachsRequestProfile::F233)
+            .expect("payload should parse");
 
         assert_eq!(
             parsed,
@@ -332,8 +358,8 @@ mod tests {
                 electricity_internal: 12_345.678,
                 heat: 98_765.432,
                 maintenance: 3_099.496,
-                buderus_starts: 91,
-                buderus_bh: 2_468.100,
+                buderus_starts: Some(91),
+                buderus_bh: Some(2_468.100),
             }
         );
     }
@@ -349,29 +375,37 @@ Wartung_Cache.ulBetriebssekundenBei=600\n\
 Brenner_Bd.ulAnzahlStarts=11\n\
 Brenner_Bd.ulBetriebssekunden=22\n";
 
-        let parsed = parse_dachs_status_payload(payload).expect("payload should parse");
+        let parsed = parse_dachs_status_payload(payload, DachsRequestProfile::F233)
+            .expect("payload should parse");
 
         assert_eq!(parsed.starts, 10);
         assert_eq!(parsed.bh, 1000.0);
         assert_eq!(parsed.electricity_internal, 123.4);
         assert_eq!(parsed.heat, 567.8);
         assert_eq!(parsed.maintenance, 3100.0);
-        assert_eq!(parsed.buderus_starts, 11);
-        assert_eq!(parsed.buderus_bh, 22.0);
+        assert_eq!(parsed.buderus_starts, Some(11));
+        assert_eq!(parsed.buderus_bh, Some(22.0));
     }
 
     #[test]
-    fn builds_upstream_url_with_embedded_credentials() {
-        let url = build_dachs_status_url(
-            "http://192.168.233.91:8080",
-            Some("glt"),
-            Some("HECHT"),
-        )
-        .expect("url should build");
+    fn builds_upstream_url_with_request_keys_for_f233() {
+        let url = build_dachs_status_url("http://192.168.233.91:8080", DachsRequestProfile::F233)
+            .expect("url should build");
 
         assert_eq!(
             url.as_str(),
-            "http://glt:HECHT@192.168.233.91:8080/getKey?k=Hka_Bd.ulAnzahlStarts&k=Hka_Bd.ulBetriebssekunden&k=Hka_Bd.ulArbeitElektr&k=Hka_Bd.ulArbeitThermHka&k=Wartung_Cache.ulBetriebssekundenBei&k=Brenner_Bd.ulAnzahlStarts&k=Brenner_Bd.ulBetriebssekunden"
+            "http://192.168.233.91:8080/getKey?k=Hka_Bd.ulAnzahlStarts&k=Hka_Bd.ulBetriebssekunden&k=Hka_Bd.ulArbeitElektr&k=Hka_Bd.ulArbeitThermHka&k=Wartung_Cache.ulBetriebssekundenBei&k=Brenner_Bd.ulAnzahlStarts&k=Brenner_Bd.ulBetriebssekunden"
+        );
+    }
+
+    #[test]
+    fn builds_upstream_url_without_buderus_keys_for_f235() {
+        let url = build_dachs_status_url("http://192.168.233.91:8080", DachsRequestProfile::F235)
+            .expect("url should build");
+
+        assert_eq!(
+            url.as_str(),
+            "http://192.168.233.91:8080/getKey?k=Hka_Bd.ulAnzahlStarts&k=Hka_Bd.ulBetriebssekunden&k=Hka_Bd.ulArbeitElektr&k=Hka_Bd.ulArbeitThermHka&k=Wartung_Cache.ulBetriebssekundenBei"
         );
     }
 }

@@ -2,24 +2,24 @@
 
 All timestamps are UTC ISO-8601 (`...Z`) unless explicitly documented otherwise.
 JSON fields use `camelCase`, except passthrough KEBA compatibility fields (`kWh`, `CardId`) and `/unplug-log` response fields (`Id`, `Timestamp`, `Station`, `Started`, `Ended`, `Wh`, `CardId`).
-Die kanonischen Endpunkte liegen unter `/api/v1`.
-Die bisherigen Root-Pfade ohne `/api/v1` bleiben vorerst aus Kompatibilitaetsgruenden erreichbar.
-Browser-Zugriffe werden ueber `CORS_ALLOWED_ORIGINS` gesteuert; Default sind `http://localhost:3000` und `https://invessiv.de`.
+The canonical endpoints live under `/api/v1`.
+The old root paths without `/api/v1` remain reachable for now for compatibility.
+Browser access is controlled via `CORS_ALLOWED_ORIGINS`; defaults are `http://localhost:3000` and `https://invessiv.de`.
 
-Ohne Domain lautet der Host einfach:
+Without a domain, the host is simply:
 ```text
-http://<OEFFENTLICHE_IP>:65109
+http://<PUBLIC_IP>:65109
 ```
 
-Beispiel:
+Example:
 ```text
 http://84.123.45.67:65109/api/v1/health
 ```
 
 ## Auth
 
-Aktuell gibt es bewusst keine Authentifizierung. Alle Readonly-Endpunkte sind ohne Token erreichbar.
-Wenn die API oeffentlich ins Internet gestellt wird, erfolgt der Zugriff derzeit also unverschluesselt und ohne Request-Auth.
+There is intentionally no authentication at the moment. All read-only endpoints are reachable without a token.
+If the API is exposed to the public internet, access is therefore currently unencrypted and without request auth.
 
 ## `GET /api/v1/health`
 Health check endpoint.
@@ -72,13 +72,14 @@ Response `200`: same JSON shape as above.
 
 Legacy compatibility path: `GET /sessions/entrance/latest`
 
-## `GET /api/v1/dachs/status`
-Liest Dachs-Betriebsdaten ueber den konfigurierten HTTP-Upstream `DACHS_BASE_URL/getKey` und mapped die angeforderten Keys auf stabile API-Felder.
-Wenn gesetzt, werden `DACHS_USERNAME` und `DACHS_PASSWORD` direkt in die Upstream-URL eingebettet, also im Stil `http://user:pass@host/getKey?...`.
+## `GET /api/v1/dachs/f233/status`
+Reads Dachs operating data via the configured HTTP upstream `DACHS_F233_BASE_URL/getKey` and maps the requested keys to stable API fields.
+Default credentials are `GLT` / `HECHT`.
+If at least one of `DACHS_F233_USERNAME` or `DACHS_F233_PASSWORD` is set, the upstream request attempts HTTP Basic Auth. If both values are missing, the request is sent without auth.
 
 Example:
 ```bash
-curl -s http://localhost:65109/api/v1/dachs/status | jq
+curl -s http://localhost:65109/api/v1/dachs/f233/status | jq
 ```
 
 Response `200`:
@@ -103,13 +104,35 @@ Mapping:
 - `buderusStarts` <= `Brenner_Bd.ulAnzahlStarts`
 - `buderusBh` <= `Brenner_Bd.ulBetriebssekunden`
 
-Legacy compatibility path: `GET /dachs/status`
+## `GET /api/v1/dachs/f235/status`
+Same contract as `/api/v1/dachs/f233/status`, but uses `DACHS_F235_BASE_URL`, `DACHS_F235_USERNAME` and `DACHS_F235_PASSWORD`.
+This endpoint does not read or return `Brenner_Bd.*` fields, so the response only contains:
+`starts`, `bh`, `electricityInternal`, `heat`, `maintenance`.
+If at least one of `DACHS_F235_USERNAME` or `DACHS_F235_PASSWORD` is set, the upstream request attempts HTTP Basic Auth. If both values are missing, the request is sent without auth.
+
+Example:
+```bash
+curl -s http://localhost:65109/api/v1/dachs/f235/status | jq
+```
+
+Default upstream for this endpoint: `http://192.168.233.92:8080`.
+
+Response `200`:
+```json
+{
+  "starts": 12,
+  "bh": 1234.5,
+  "electricityInternal": 2500.0,
+  "heat": 3750.5,
+  "maintenance": 3225.0
+}
+```
 
 ## `GET /api/v1/unplug-log?count={x}`
-Liefert die neuesten Eintraege aus `unplug_log_events`, sortiert nach `Timestamp DESC, Id DESC`.
-`count` entspricht einem SQL-`LIMIT` (vergleichbar mit `SELECT TOP x ...`) und ist optional.
+Returns the latest entries from `unplug_log_events`, sorted by `Timestamp DESC, Id DESC`.
+`count` corresponds to a SQL `LIMIT` (similar to `SELECT TOP x ...`) and is optional.
 
-Beispiele:
+Examples:
 ```bash
 curl -s "http://localhost:65109/api/v1/unplug-log?count=5" | jq
 curl -s "http://localhost:65109/api/v1/unplug-log" | jq
@@ -139,7 +162,7 @@ Response `200`:
 }
 ```
 
-`400` (ungueltiger `count` Parameter):
+`400` (invalid `count` parameter):
 ```json
 {
   "error": "query parameter 'count' must be >= 1"
@@ -164,7 +187,7 @@ or
 `503` (Dachs endpoint disabled):
 ```json
 {
-  "error": "dachs status endpoint is not configured"
+  "error": "dachs f233 status endpoint is not configured"
 }
 ```
 
@@ -175,6 +198,13 @@ or
 }
 ```
 
+`404` (removed legacy path):
+```json
+{
+  "error": "not found"
+}
+```
+
 ## CORS
 
 Default:
@@ -182,9 +212,9 @@ Default:
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 ```
 
-Restriktiver Betrieb mit bekannter Frontend-Origin:
+Restricted operation with a known frontend origin:
 ```bash
 CORS_ALLOWED_ORIGINS=http://localhost:3000,https://invessiv.de
 ```
 
-Die API beantwortet CORS-Preflights direkt ueber die Actix-CORS-Middleware und erlaubt dabei mindestens `GET` und `OPTIONS` sowie die Header `Accept`, `Authorization` und `Content-Type`.
+The API answers CORS preflights directly via the Actix CORS middleware and allows at least `GET` and `OPTIONS` as well as the headers `Accept`, `Authorization`, and `Content-Type`.

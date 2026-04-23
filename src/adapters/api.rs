@@ -3,8 +3,9 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::adapters::dachs_http::fetch_dachs_status;
+use crate::adapters::dachs_http::{DachsRequestProfile, fetch_dachs_status};
 use crate::adapters::keba_udp::KebaUdpClient;
+use crate::app::DachsDeviceConfig;
 use crate::app::services::{SessionQueryHandler, SqliteSessionService};
 
 const API_V1_PREFIX: &str = "/api/v1";
@@ -12,11 +13,16 @@ const API_V1_PREFIX: &str = "/api/v1";
 #[derive(Clone)]
 pub struct ApiState {
     pub report100_stations: Vec<Report100Station>,
-    pub dachs_base_url: Option<String>,
-    pub dachs_username: Option<String>,
-    pub dachs_password: Option<String>,
+    pub dachs_f233: Option<DachsDeviceConfig>,
+    pub dachs_f235: Option<DachsDeviceConfig>,
     pub dachs_http_client: reqwest::Client,
     pub session_query_service: Option<SqliteSessionService>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DachsDeviceTarget {
+    F233,
+    F235,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,9 +84,18 @@ pub struct DachsStatusResponse {
     pub buderus_bh: f64,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DachsStatusResponseLite {
+    pub starts: u64,
+    pub bh: f64,
+    pub electricity_internal: f64,
+    pub heat: f64,
+    pub maintenance: f64,
+}
+
 fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/unplug-log").route(web::get().to(get_unplug_log_events_endpoint)))
-        .service(web::resource("/dachs/status").route(web::get().to(get_dachs_status_endpoint)))
         .service(
             web::resource("/sessions/carport/latest")
                 .route(web::get().to(get_carport_latest_report100_endpoint)),
@@ -97,6 +112,14 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         .service(
             web::scope(API_V1_PREFIX)
                 .service(web::resource("/health").route(web::get().to(health)))
+                .service(
+                    web::resource("/dachs/f233/status")
+                        .route(web::get().to(get_dachs_f233_status_endpoint)),
+                )
+                .service(
+                    web::resource("/dachs/f235/status")
+                        .route(web::get().to(get_dachs_f235_status_endpoint)),
+                )
                 .configure(configure_protected_routes),
         );
 }
@@ -113,33 +136,77 @@ async fn get_entrance_latest_report100_endpoint(state: web::Data<ApiState>) -> i
     latest_report100_response(&state, "entrance")
 }
 
-async fn get_dachs_status_endpoint(state: web::Data<ApiState>) -> impl Responder {
-    let Some(base_url) = state.dachs_base_url.as_deref() else {
+async fn get_dachs_f233_status_endpoint(state: web::Data<ApiState>) -> impl Responder {
+    get_dachs_status_endpoint(state, DachsDeviceTarget::F233).await
+}
+
+async fn get_dachs_f235_status_endpoint(state: web::Data<ApiState>) -> impl Responder {
+    get_dachs_status_endpoint(state, DachsDeviceTarget::F235).await
+}
+
+async fn get_dachs_status_endpoint(
+    state: web::Data<ApiState>,
+    target: DachsDeviceTarget,
+) -> impl Responder {
+    let Some(device_config) = dachs_device_config(&state, target) else {
         return HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "error": "dachs status endpoint is not configured"
+            "error": format!("dachs {} status endpoint is not configured", target.as_str())
         }));
     };
 
     match fetch_dachs_status(
         &state.dachs_http_client,
-        base_url,
-        state.dachs_username.as_deref(),
-        state.dachs_password.as_deref(),
+        &device_config.base_url,
+        device_config.username.as_deref(),
+        device_config.password.as_deref(),
+        match target {
+            DachsDeviceTarget::F233 => DachsRequestProfile::F233,
+            DachsDeviceTarget::F235 => DachsRequestProfile::F235,
+        },
     )
     .await
     {
-        Ok(status) => HttpResponse::Ok().json(DachsStatusResponse {
-            starts: status.starts,
-            bh: status.bh,
-            electricity_internal: status.electricity_internal,
-            heat: status.heat,
-            maintenance: status.maintenance,
-            buderus_starts: status.buderus_starts,
-            buderus_bh: status.buderus_bh,
-        }),
+        Ok(status) => match target {
+            DachsDeviceTarget::F233 => HttpResponse::Ok().json(DachsStatusResponse {
+                starts: status.starts,
+                bh: status.bh,
+                electricity_internal: status.electricity_internal,
+                heat: status.heat,
+                maintenance: status.maintenance,
+                buderus_starts: status
+                    .buderus_starts
+                    .expect("f233 response must include buderus starts"),
+                buderus_bh: status
+                    .buderus_bh
+                    .expect("f233 response must include buderus bh"),
+            }),
+            DachsDeviceTarget::F235 => HttpResponse::Ok().json(DachsStatusResponseLite {
+                starts: status.starts,
+                bh: status.bh,
+                electricity_internal: status.electricity_internal,
+                heat: status.heat,
+                maintenance: status.maintenance,
+            }),
+        },
         Err(error) => HttpResponse::BadGateway().json(serde_json::json!({
             "error": format!("failed to fetch dachs status: {error}")
         })),
+    }
+}
+
+fn dachs_device_config(state: &ApiState, target: DachsDeviceTarget) -> Option<&DachsDeviceConfig> {
+    match target {
+        DachsDeviceTarget::F233 => state.dachs_f233.as_ref(),
+        DachsDeviceTarget::F235 => state.dachs_f235.as_ref(),
+    }
+}
+
+impl DachsDeviceTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            DachsDeviceTarget::F233 => "f233",
+            DachsDeviceTarget::F235 => "f235",
+        }
     }
 }
 
@@ -520,6 +587,7 @@ mod tests {
     use serde_json::json;
 
     use super::{ApiState, Report100Station, configure_routes, parse_absolute_timestamp_ms};
+    use crate::app::DachsDeviceConfig;
     use crate::app::services::{SessionCommandHandler, SqliteSessionService};
     use crate::domain::models::NewUnplugLogRecord;
     use crate::test_support::open_test_connection;
@@ -527,12 +595,93 @@ mod tests {
     fn empty_state() -> ApiState {
         ApiState {
             report100_stations: Vec::new(),
-            dachs_base_url: None,
-            dachs_username: None,
-            dachs_password: None,
+            dachs_f233: None,
+            dachs_f235: None,
             dachs_http_client: reqwest::Client::new(),
             session_query_service: None,
         }
+    }
+
+    fn encode_basic_auth_token(username: &str, password: &str) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let input = format!("{username}:{password}");
+        let bytes = input.as_bytes();
+        let mut encoded = String::new();
+        let mut index = 0;
+
+        while index < bytes.len() {
+            let remaining = bytes.len() - index;
+            let b0 = bytes[index];
+            let b1 = if remaining > 1 { bytes[index + 1] } else { 0 };
+            let b2 = if remaining > 2 { bytes[index + 2] } else { 0 };
+
+            encoded.push(TABLE[(b0 >> 2) as usize] as char);
+            encoded.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+            if remaining > 1 {
+                encoded.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+            if remaining > 2 {
+                encoded.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+
+            index += 3;
+        }
+
+        encoded
+    }
+
+    fn spawn_dachs_mock_server(
+        body: &'static str,
+    ) -> (u16, Arc<Mutex<String>>, thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let request_capture = Arc::new(Mutex::new(String::new()));
+        let request_capture_responder = Arc::clone(&request_capture);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("addr should be available")
+            .port();
+
+        let responder_handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut buffer = [0_u8; 4096];
+            let mut request = Vec::new();
+            loop {
+                let size = stream
+                    .read(&mut buffer)
+                    .expect("request should be readable");
+                if size == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..size]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            *request_capture_responder
+                .lock()
+                .expect("request capture mutex should be lockable") =
+                String::from_utf8_lossy(&request).to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should be writable");
+        });
+
+        (port, request_capture, responder_handle)
     }
 
     #[actix_web::test]
@@ -636,50 +785,24 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn dachs_status_endpoint_maps_upstream_fields() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let request_capture = Arc::new(Mutex::new(String::new()));
-        let request_capture_responder = Arc::clone(&request_capture);
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("addr should be available");
-
-        let responder_handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request should arrive");
-            let mut buffer = [0_u8; 4096];
-            let size = stream
-                .read(&mut buffer)
-                .expect("request should be readable");
-            *request_capture_responder
-                .lock()
-                .expect("request capture mutex should be lockable") =
-                String::from_utf8_lossy(&buffer[..size]).to_string();
-
-            let body = r#"{
-                "Hka_Bd.ulAnzahlStarts": "476",
-                "Hka_Bd.ulBetriebssekunden": "47.088,020",
-                "Hka_Bd.ulArbeitElektr": "12.345,678",
-                "Hka_Bd.ulArbeitThermHka": "98.765,432",
-                "Wartung_Cache.ulBetriebssekundenBei": "46.687,516",
-                "Brenner_Bd.ulAnzahlStarts": "91",
-                "Brenner_Bd.ulBetriebssekunden": "2.468,100"
-            }"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-
-            stream
-                .write_all(response.as_bytes())
-                .expect("response should be writable");
-        });
+    async fn dachs_f233_status_endpoint_maps_upstream_fields_and_uses_own_credentials() {
+        let body = r#"{
+            "Hka_Bd.ulAnzahlStarts": "476",
+            "Hka_Bd.ulBetriebssekunden": "47.088,020",
+            "Hka_Bd.ulArbeitElektr": "12.345,678",
+            "Hka_Bd.ulArbeitThermHka": "98.765,432",
+            "Wartung_Cache.ulBetriebssekundenBei": "46.687,516",
+            "Brenner_Bd.ulAnzahlStarts": "91",
+            "Brenner_Bd.ulBetriebssekunden": "2.468,100"
+        }"#;
+        let (port, request_capture, responder_handle) = spawn_dachs_mock_server(body);
 
         let mut state = empty_state();
-        state.dachs_base_url = Some(format!("http://{addr}"));
-        state.dachs_username = Some("service-user".to_string());
-        state.dachs_password = Some("secret".to_string());
+        state.dachs_f233 = Some(DachsDeviceConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            username: Some("service-user-f233".to_string()),
+            password: Some("secret-f233".to_string()),
+        });
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(state))
@@ -688,7 +811,7 @@ mod tests {
         .await;
 
         let req = test::TestRequest::get()
-            .uri("/api/v1/dachs/status")
+            .uri("/api/v1/dachs/f233/status")
             .to_request();
         let resp = test::call_service(&app, req).await;
 
@@ -721,10 +844,128 @@ mod tests {
         assert!(request.contains("k=Wartung_Cache.ulBetriebssekundenBei"));
         assert!(request.contains("k=Brenner_Bd.ulAnzahlStarts"));
         assert!(request.contains("k=Brenner_Bd.ulBetriebssekunden"));
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains(&format!(
+            "authorization: basic {}",
+            encode_basic_auth_token("service-user-f233", "secret-f233").to_ascii_lowercase()
+        )));
     }
 
     #[actix_web::test]
-    async fn dachs_status_endpoint_returns_503_when_disabled() {
+    async fn dachs_f235_status_endpoint_maps_upstream_fields_and_uses_own_credentials() {
+        let body = r#"{
+            "Hka_Bd.ulAnzahlStarts": "12",
+            "Hka_Bd.ulBetriebssekunden": "1.234,500",
+            "Hka_Bd.ulArbeitElektr": "2.500,000",
+            "Hka_Bd.ulArbeitThermHka": "3.750,500",
+            "Wartung_Cache.ulBetriebssekundenBei": "1.000,000",
+            "Brenner_Bd.ulAnzahlStarts": "7",
+            "Brenner_Bd.ulBetriebssekunden": "456,000"
+        }"#;
+        let (port, request_capture, responder_handle) = spawn_dachs_mock_server(body);
+
+        let mut state = empty_state();
+        state.dachs_f235 = Some(DachsDeviceConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            username: Some("service-user-f235".to_string()),
+            password: Some("secret-f235".to_string()),
+        });
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/f235/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["starts"], 12);
+        assert_eq!(json["bh"], 1_234.500);
+        assert_eq!(json["electricityInternal"], 2_500.000);
+        assert_eq!(json["heat"], 3_750.500);
+        assert_eq!(json["maintenance"], 3_500.000 - (1_234.5 - 1_000.0));
+        assert!(json.get("buderusStarts").is_none());
+        assert!(json.get("buderusBh").is_none());
+
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+
+        let request = request_capture
+            .lock()
+            .expect("request capture mutex should be lockable")
+            .clone();
+        assert!(request.contains("GET /getKey?"));
+        assert!(request.contains("k=Hka_Bd.ulAnzahlStarts"));
+        assert!(request.contains("k=Hka_Bd.ulBetriebssekunden"));
+        assert!(request.contains("k=Hka_Bd.ulArbeitElektr"));
+        assert!(request.contains("k=Hka_Bd.ulArbeitThermHka"));
+        assert!(request.contains("k=Wartung_Cache.ulBetriebssekundenBei"));
+        assert!(!request.contains("k=Brenner_Bd.ulAnzahlStarts"));
+        assert!(!request.contains("k=Brenner_Bd.ulBetriebssekunden"));
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains(&format!(
+            "authorization: basic {}",
+            encode_basic_auth_token("service-user-f235", "secret-f235").to_ascii_lowercase()
+        )));
+    }
+
+    #[actix_web::test]
+    async fn dachs_f235_status_endpoint_sends_auth_when_only_password_is_configured() {
+        let body = r#"{
+            "Hka_Bd.ulAnzahlStarts": "12",
+            "Hka_Bd.ulBetriebssekunden": "1.234,500",
+            "Hka_Bd.ulArbeitElektr": "2.500,000",
+            "Hka_Bd.ulArbeitThermHka": "3.750,500",
+            "Wartung_Cache.ulBetriebssekundenBei": "1.000,000"
+        }"#;
+        let (port, request_capture, responder_handle) = spawn_dachs_mock_server(body);
+
+        let mut state = empty_state();
+        state.dachs_f235 = Some(DachsDeviceConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            username: None,
+            password: Some("secret-f235".to_string()),
+        });
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/f235/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        responder_handle
+            .join()
+            .expect("responder thread should terminate cleanly");
+
+        let request = request_capture
+            .lock()
+            .expect("request capture mutex should be lockable")
+            .clone();
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains(&format!(
+            "authorization: basic {}",
+            encode_basic_auth_token("", "secret-f235").to_ascii_lowercase()
+        )));
+    }
+
+    #[actix_web::test]
+    async fn legacy_dachs_status_endpoint_returns_404() {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(empty_state()))
@@ -737,12 +978,57 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
 
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn dachs_f233_status_endpoint_returns_503_when_disabled() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/f233/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(resp.into_body())
             .await
             .expect("body should be readable");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(json["error"], "dachs status endpoint is not configured");
+        assert_eq!(
+            json["error"],
+            "dachs f233 status endpoint is not configured"
+        );
+    }
+
+    #[actix_web::test]
+    async fn dachs_f235_status_endpoint_returns_503_when_disabled() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(empty_state()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/dachs/f235/status")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(
+            json["error"],
+            "dachs f235 status endpoint is not configured"
+        );
     }
 
     #[actix_web::test]
@@ -1778,8 +2064,10 @@ mod tests {
             (now_before as f64 - ((sec_now * 1000.0) - started_raw)) as i64 - 2000;
         let expected_started_max =
             (now_after as f64 - ((sec_now * 1000.0) - started_raw)) as i64 + 2000;
-        let expected_ended_min = (now_before as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 - 2000;
-        let expected_ended_max = (now_after as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 + 2000;
+        let expected_ended_min =
+            (now_before as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 - 2000;
+        let expected_ended_max =
+            (now_after as f64 - ((sec_now * 1000.0) - ended_raw)) as i64 + 2000;
 
         let started = json["started"].as_i64().expect("started should be i64");
         let ended = json["ended"].as_i64().expect("ended should be i64");

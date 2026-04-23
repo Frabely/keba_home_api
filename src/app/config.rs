@@ -13,9 +13,8 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     pub db_path: String,
     pub http_bind: String,
-    pub dachs_base_url: Option<String>,
-    pub dachs_username: Option<String>,
-    pub dachs_password: Option<String>,
+    pub dachs_f233: Option<DachsDeviceConfig>,
+    pub dachs_f235: Option<DachsDeviceConfig>,
     pub cors_allowed_origins: CorsAllowedOrigins,
     pub debounce_samples: usize,
     pub station_id: Option<String>,
@@ -34,6 +33,13 @@ pub enum KebaSource {
 pub enum CorsAllowedOrigins {
     Any,
     Exact(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DachsDeviceConfig {
+    pub base_url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 const DEFAULT_CORS_ALLOWED_ORIGINS: [&str; 2] = ["http://localhost:3000", "https://invessiv.de"];
@@ -113,23 +119,8 @@ impl AppConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "0.0.0.0:65109".to_string()),
-            dachs_base_url: match lookup("DACHS_BASE_URL") {
-                Some(raw) => {
-                    let trimmed = raw.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
-                None => Some("http://192.168.233.91:8080".to_string()),
-            },
-            dachs_username: lookup("DACHS_USERNAME")
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            dachs_password: lookup("DACHS_PASSWORD")
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
+            dachs_f233: parse_dachs_device_config(&lookup, "DACHS_F233")?,
+            dachs_f235: parse_dachs_device_config(&lookup, "DACHS_F235")?,
             cors_allowed_origins: parse_cors_allowed_origins(&lookup)?,
             debounce_samples: parse_or_default(&lookup, "DEBOUNCE_SAMPLES", 3_usize)?,
             station_id: station_id.clone(),
@@ -194,6 +185,40 @@ where
             .parse::<T>()
             .map_err(|_| AppError::config(format!("{key} must be a valid number"))),
         None => Ok(default),
+    }
+}
+
+fn parse_dachs_device_config<F>(
+    lookup: &F,
+    prefix: &str,
+) -> Result<Option<DachsDeviceConfig>, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let base_url_key = format!("{prefix}_BASE_URL");
+    let username_key = format!("{prefix}_USERNAME");
+    let password_key = format!("{prefix}_PASSWORD");
+
+    let base_url = lookup(&base_url_key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let username = lookup(&username_key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let password = lookup(&password_key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    match base_url {
+        Some(base_url) => Ok(Some(DachsDeviceConfig {
+            base_url,
+            username,
+            password,
+        })),
+        None if username.is_some() || password.is_some() => Err(AppError::config(format!(
+            "{prefix}_BASE_URL is required when {prefix}_USERNAME or {prefix}_PASSWORD is set"
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -302,7 +327,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, CorsAllowedOrigins, KebaSource, StatusStationConfig};
+    use super::{
+        AppConfig, CorsAllowedOrigins, DachsDeviceConfig, KebaSource, StatusStationConfig,
+    };
 
     #[test]
     fn rejects_missing_keba_ip() {
@@ -337,12 +364,8 @@ mod tests {
             assert_eq!(result.db_path, "/var/lib/keba/keba.db");
         }
         assert_eq!(result.http_bind, "0.0.0.0:65109");
-        assert_eq!(
-            result.dachs_base_url,
-            Some("http://192.168.233.91:8080".to_string())
-        );
-        assert_eq!(result.dachs_username, None);
-        assert_eq!(result.dachs_password, None);
+        assert_eq!(result.dachs_f233, None);
+        assert_eq!(result.dachs_f235, None);
         assert_eq!(
             result.cors_allowed_origins,
             CorsAllowedOrigins::Exact(vec![
@@ -509,25 +532,50 @@ mod tests {
     fn allows_disabling_dachs_endpoint_via_empty_env() {
         let result = AppConfig::from_lookup(|key| match key {
             "KEBA_IP" => Some("192.168.1.10".to_string()),
-            "DACHS_BASE_URL" => Some("   ".to_string()),
+            "DACHS_F233_BASE_URL" => Some("   ".to_string()),
+            "DACHS_F235_BASE_URL" => Some("   ".to_string()),
             _ => None,
         })
         .expect("config should be valid");
 
-        assert_eq!(result.dachs_base_url, None);
+        assert_eq!(result.dachs_f233, None);
+        assert_eq!(result.dachs_f235, None);
     }
 
     #[test]
     fn parses_optional_dachs_credentials() {
         let result = AppConfig::from_lookup(|key| match key {
             "KEBA_IP" => Some("192.168.1.10".to_string()),
-            "DACHS_USERNAME" => Some("service-user".to_string()),
-            "DACHS_PASSWORD" => Some("secret".to_string()),
+            "DACHS_F233_BASE_URL" => Some("http://192.168.233.91:8080".to_string()),
+            "DACHS_F233_USERNAME" => Some("service-user".to_string()),
+            "DACHS_F233_PASSWORD" => Some("secret".to_string()),
             _ => None,
         })
         .expect("config should be valid");
 
-        assert_eq!(result.dachs_username, Some("service-user".to_string()));
-        assert_eq!(result.dachs_password, Some("secret".to_string()));
+        assert_eq!(
+            result.dachs_f233,
+            Some(DachsDeviceConfig {
+                base_url: "http://192.168.233.91:8080".to_string(),
+                username: Some("service-user".to_string()),
+                password: Some("secret".to_string()),
+            })
+        );
+        assert_eq!(result.dachs_f235, None);
+    }
+
+    #[test]
+    fn rejects_credentials_without_base_url() {
+        let result = AppConfig::from_lookup(|key| match key {
+            "KEBA_IP" => Some("192.168.1.10".to_string()),
+            "DACHS_F235_USERNAME" => Some("service-user".to_string()),
+            _ => None,
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "invalid configuration: DACHS_F235_BASE_URL is required when DACHS_F235_USERNAME or DACHS_F235_PASSWORD is set"
+        );
     }
 }

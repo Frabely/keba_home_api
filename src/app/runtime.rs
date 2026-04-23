@@ -492,9 +492,8 @@ pub fn run_combined(config: AppConfig) -> Result<(), AppError> {
     let session_service = SqliteSessionService::new(Arc::clone(&shared_connection));
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
-        dachs_base_url: config.dachs_base_url.clone(),
-        dachs_username: config.dachs_username.clone(),
-        dachs_password: config.dachs_password.clone(),
+        dachs_f233: config.dachs_f233.clone(),
+        dachs_f235: config.dachs_f235.clone(),
         dachs_http_client: reqwest::Client::new(),
         session_query_service: Some(session_service.clone()),
     };
@@ -539,9 +538,8 @@ pub fn run_api(config: AppConfig) -> Result<(), AppError> {
     let session_query_service = SqliteSessionService::new(connection);
     let api_state = ApiState {
         report100_stations: build_report100_stations(&config),
-        dachs_base_url: config.dachs_base_url.clone(),
-        dachs_username: config.dachs_username.clone(),
-        dachs_password: config.dachs_password.clone(),
+        dachs_f233: config.dachs_f233.clone(),
+        dachs_f235: config.dachs_f235.clone(),
         dachs_http_client: reqwest::Client::new(),
         session_query_service: Some(session_query_service),
     };
